@@ -1,0 +1,36 @@
+[build-system]
+requires = ['setuptools>=68']
+build-backend = 'setuptools.build_meta'
+
+[project]
+name = 'yam-control'
+version = '0.1.0'
+description = 'Configuration-driven YAM teleoperation and inference runtime'
+requires-python = '>=3.12,<3.13'
+dependencies = [
+    'aiortc>=1.9',
+    'av>=12',
+    'fastapi>=0.115',
+    'i2rt',
+    'pillow>=12,<13',
+    'uvicorn[standard]>=0.30',
+]
+
+[dependency-groups]
+dev = ['pytest>=8.0']
+notebook = ['ipykernel>=6.29,<7']
+
+[tool.pytest.ini_options]
+testpaths = ['tests']
+
+[tool.uv]
+build-constraint-dependencies = ['scikit-build-core<0.10']
+
+[tool.uv.sources]
+i2rt = { path = 'third_party/yam-abc-reproduce/third_party/i2rt', editable = true }
+
+[tool.setuptools.packages.find]
+include = ['yam_control*']
+
+[tool.setuptools.package-data]
+yam_control = ['teleop/web/*.html', 'teleop/web/*.js']

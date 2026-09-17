@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang='ko'>
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <title>YAM Quest Teleoperation</title>
+  <style>
+    body { margin: 0; padding: 1.5rem; background: #14191f; color: #f3f6f8; font: 1rem system-ui, sans-serif; }
+    main { max-width: 42rem; margin: auto; }
+    button { padding: .8rem 1.2rem; border: 0; border-radius: .5rem; font: inherit; background: #74d4bd; color: #101820; }
+    button:disabled { opacity: .5; }
+    video { display: block; width: 100%; max-width: 640px; margin-top: 1rem; background: #000; }
+    canvas { display: none; }
+    #status { margin: 1rem 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>YAM Quest Teleoperation</h1>
+    <p id='status' role='status'>연결 중</p>
+    <button id='teleop-button' disabled>Start Teleop</button>
+    <p>헤드셋을 착용하고 Grip을 누른 동안 controller를 움직이세요.</p>
+    <video id='camera-preview' autoplay muted playsinline></video>
+    <canvas id='xr-canvas'></canvas>
+  </main>
+  <script src='/static/quest_input.js'></script>
+  <script src='/static/quest_client.js'></script>
+</body>
+</html>

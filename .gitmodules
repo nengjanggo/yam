@@ -1,0 +1,3 @@
+[submodule "third_party/yam-abc-reproduce"]
+	path = third_party/yam-abc-reproduce
+	url = https://github.com/i2rt-robotics/yam-abc-reproduce.git
