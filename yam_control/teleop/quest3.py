@@ -363,7 +363,10 @@ class Quest3ActionProducer:
         self,
         observation: RobotObservation,
     ) -> None:
-        '''Episode마다 clutch 상태를 초기화한다.'''
+        '''Episode마다 clutch 상태와 optional retargeter 진단값을 초기화한다.'''
+        reset_diagnostics: object = getattr(self._retargeter, 'reset_diagnostics', None)
+        if callable(reset_diagnostics):
+            reset_diagnostics()
         self._engaged = False
         self._reengage_required = False
         self.last_hold_reason = None
@@ -417,7 +420,11 @@ class Quest3ActionProducer:
     def diagnostics(
         self,
     ) -> dict[str, object]:
-        '''현재 episode의 clutch, hold 사유와 action 변화량 진단값을 반환한다.'''
+        '''현재 episode의 clutch, reader와 optional IK 진단값을 반환한다.'''
+        diagnostics_method: object = getattr(self._retargeter, 'diagnostics', None)
+        retargeter_diagnostics: object = diagnostics_method() if callable(diagnostics_method) else {}
+        if not isinstance(retargeter_diagnostics, Mapping):
+            raise TypeError('Quest retargeter diagnostics must be a mapping')
         return {
             'clutch_control_step_count': self._clutch_control_step_count,
             'changed_action_step_count': self._changed_action_step_count,
@@ -425,6 +432,7 @@ class Quest3ActionProducer:
             'hold_reason_counts': dict(self._hold_reason_counts),
             'last_hold_reason': self.last_hold_reason,
             'reader': self._reader.diagnostics(),
+            'retargeter': dict(retargeter_diagnostics),
         }
 
     def close(

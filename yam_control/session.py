@@ -10,6 +10,7 @@ from .interfaces import ActionProducer, EpisodeRecorder, RobotBackend, SafetyGat
 from .types import EpisodeState, RobotAction, RobotObservation, SafetyDecision
 
 Sleeper = Callable[[float], None]
+Clock = Callable[[], float]
 
 
 class RunSession:
@@ -23,6 +24,7 @@ class RunSession:
         safety_gate: SafetyGate,
         recorder: EpisodeRecorder,
         sleeper: Sleeper = time.sleep,
+        clock: Clock = time.perf_counter,
     ) -> None:
         '''Configuration과 독립 component를 저장하고 IDLE state로 시작한다.'''
         self.config: RunConfig = config
@@ -31,9 +33,15 @@ class RunSession:
         self._safety_gate: SafetyGate = safety_gate
         self._recorder: EpisodeRecorder = recorder
         self._sleeper: Sleeper = sleeper
+        self._clock: Clock = clock
         self.state: EpisodeState = EpisodeState.IDLE
         self._connected: bool = False
         self._stop_requested: bool = False
+        self._completed_step_count: int = 0
+        self._total_processing_s: float = 0.0
+        self._max_processing_s: float = 0.0
+        self._total_tick_period_s: float = 0.0
+        self._max_tick_period_s: float = 0.0
 
     def connect(
         self,
@@ -77,6 +85,30 @@ class RunSession:
             raise TypeError('ActionProducer diagnostics must be a mapping')
         return dict(diagnostics)
 
+    def control_loop_diagnostics(
+        self,
+    ) -> dict[str, int | float | None]:
+        '''완료된 step의 처리 시간, 실제 tick 주기와 제어 주파수를 반환한다.'''
+        completed_step_count: int = self._completed_step_count
+        if completed_step_count == 0:
+            return {
+                'completed_step_count': 0,
+                'mean_processing_ms': None,
+                'max_processing_ms': None,
+                'mean_tick_period_ms': None,
+                'max_tick_period_ms': None,
+                'actual_control_hz': None,
+            }
+        return {
+            'completed_step_count': completed_step_count,
+            'mean_processing_ms': self._total_processing_s * 1000.0 / completed_step_count,
+            'max_processing_ms': self._max_processing_s * 1000.0,
+            'mean_tick_period_ms': self._total_tick_period_s * 1000.0 / completed_step_count,
+            'max_tick_period_ms': self._max_tick_period_s * 1000.0,
+            'actual_control_hz': completed_step_count / self._total_tick_period_s
+            if self._total_tick_period_s > 0.0 else None,
+        }
+
     def run_prepared_episode(
         self,
         max_steps: int,
@@ -86,6 +118,12 @@ class RunSession:
             raise RuntimeError('prepare_episode must run before run_prepared_episode')
         if max_steps <= 0:
             raise ValueError('max_steps must be positive')
+        # 새 episode의 완료된 control step만 집계한다.
+        self._completed_step_count = 0
+        self._total_processing_s = 0.0
+        self._max_processing_s = 0.0
+        self._total_tick_period_s = 0.0
+        self._max_tick_period_s = 0.0
         if self.config.common.execution_target == 'real':
             initial_pose: tuple[float, ...] = self.config.common.robot.episode_initial_pose
             self._robot.move_to_pose(initial_pose)
@@ -100,6 +138,7 @@ class RunSession:
             del step_index
             if self._stop_requested:
                 break
+            step_start_s: float = self._clock()
             observation = self._robot.get_observation()
             candidate_action: RobotAction = self._action_producer.next_action(observation)
             decision: SafetyDecision = self._safety_gate.evaluate(observation, candidate_action)
@@ -110,7 +149,14 @@ class RunSession:
                 return self.state
             self._robot.execute(decision.action)
             self._recorder.record(observation, decision.action)
+            processing_s: float = self._clock() - step_start_s
             self._sleeper(control_period_s)
+            tick_period_s: float = self._clock() - step_start_s
+            self._completed_step_count += 1
+            self._total_processing_s += processing_s
+            self._max_processing_s = max(self._max_processing_s, processing_s)
+            self._total_tick_period_s += tick_period_s
+            self._max_tick_period_s = max(self._max_tick_period_s, tick_period_s)
         self._robot.hold()
         self._recorder.finish()
         self.state = EpisodeState.FINISHED

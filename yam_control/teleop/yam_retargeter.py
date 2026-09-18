@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import mujoco
 import numpy as np
 from numpy.typing import NDArray
@@ -105,6 +107,72 @@ class YamQuestRetargeter:
                 for joint_index in range(1, ARM_DOF + 1)
             ],
             dtype=np.float64,
+        )
+        self.reset_diagnostics()
+
+    def reset_diagnostics(
+        self,
+    ) -> None:
+        '''새 episode의 IK 시간, 실패, clipping과 model FK 오차 누적값을 초기화한다.'''
+        self._ik_attempt_count: int = 0
+        self._ik_failure_count: int = 0
+        self._ik_solve_total_ms: float = 0.0
+        self._ik_solve_max_ms: float = 0.0
+        self._joint_delta_clipped_step_count: int = 0
+        self._joint_limit_clipped_step_count: int = 0
+        self._target_to_commanded_ee_position_total_m: float = 0.0
+        self._target_to_commanded_ee_position_max_m: float = 0.0
+        self._target_to_commanded_ee_orientation_total_rad: float = 0.0
+        self._target_to_commanded_ee_orientation_max_rad: float = 0.0
+
+    def diagnostics(
+        self,
+    ) -> dict[str, int | float | None]:
+        '''현재 episode의 IK와 명령 EE model FK 진단값을 반환한다.'''
+        attempt_count: int = self._ik_attempt_count
+        return {
+            'ik_attempt_count': attempt_count,
+            'ik_failure_count': self._ik_failure_count,
+            'ik_solve_mean_ms': self._ik_solve_total_ms / attempt_count if attempt_count else None,
+            'ik_solve_max_ms': self._ik_solve_max_ms if attempt_count else None,
+            'joint_delta_clipped_step_count': self._joint_delta_clipped_step_count,
+            'joint_limit_clipped_step_count': self._joint_limit_clipped_step_count,
+            'target_to_commanded_ee_position_mean_m': (
+                self._target_to_commanded_ee_position_total_m / attempt_count if attempt_count else None
+            ),
+            'target_to_commanded_ee_position_max_m': (
+                self._target_to_commanded_ee_position_max_m if attempt_count else None
+            ),
+            'target_to_commanded_ee_orientation_mean_rad': (
+                self._target_to_commanded_ee_orientation_total_rad / attempt_count if attempt_count else None
+            ),
+            'target_to_commanded_ee_orientation_max_rad': (
+                self._target_to_commanded_ee_orientation_max_rad if attempt_count else None
+            ),
+        }
+
+    def _record_target_error(
+        self,
+        qpos: NDArray[np.float64],
+        target_position: NDArray[np.float64],
+        target_quaternion_wxyz: NDArray[np.float64],
+    ) -> None:
+        '''명령 qpos의 model FK와 controller 목표 pose 사이 오차를 누적한다.'''
+        commanded_position: NDArray[np.float64]
+        commanded_quaternion_wxyz: NDArray[np.float64]
+        commanded_position, commanded_quaternion_wxyz = self._end_effector_pose(qpos)
+        position_error_m: float = float(np.linalg.norm(target_position - commanded_position))
+        quaternion_dot: float = float(np.dot(target_quaternion_wxyz, commanded_quaternion_wxyz))
+        orientation_error_rad: float = float(2.0 * np.arccos(np.clip(abs(quaternion_dot), 0.0, 1.0)))
+        self._target_to_commanded_ee_position_total_m += position_error_m
+        self._target_to_commanded_ee_position_max_m = max(
+            self._target_to_commanded_ee_position_max_m,
+            position_error_m,
+        )
+        self._target_to_commanded_ee_orientation_total_rad += orientation_error_rad
+        self._target_to_commanded_ee_orientation_max_rad = max(
+            self._target_to_commanded_ee_orientation_max_rad,
+            orientation_error_rad,
         )
 
     def _joint_qpos_address(
@@ -211,6 +279,7 @@ class YamQuestRetargeter:
         target_transform[:3, 3] = target_position
         success: bool
         solved_qpos: NDArray[np.float64]
+        solve_start_s: float = time.perf_counter()
         success, solved_qpos = self._kinematics.ik(
             target_pose=target_transform,
             site_name=GRASP_SITE_NAME,
@@ -219,7 +288,13 @@ class YamQuestRetargeter:
             ori_threshold=1e-3,
             max_iters=100,
         )
+        solve_ms: float = (time.perf_counter() - solve_start_s) * 1000.0
+        self._ik_attempt_count += 1
+        self._ik_solve_total_ms += solve_ms
+        self._ik_solve_max_ms = max(self._ik_solve_max_ms, solve_ms)
         if not success:
+            self._ik_failure_count += 1
+            self._record_target_error(qpos, target_position, target_quaternion_wxyz)
             return RobotAction(values=observation.state)
         # Shape `(nq,)` IK result에서 shape `(6,)` arm joint target을 추출
         solved_arm: NDArray[np.float64] = solved_qpos[self._arm_qpos_addresses]
@@ -228,13 +303,22 @@ class YamQuestRetargeter:
             self._arm_joint_limits[:, 0],
             self._arm_joint_limits[:, 1],
         )
+        if np.any(np.abs(bounded_arm - solved_arm) > 1e-12):
+            self._joint_limit_clipped_step_count += 1
         current_arm: NDArray[np.float64] = np.asarray(observation.state[:ARM_DOF], dtype=np.float64)
+        requested_joint_delta: NDArray[np.float64] = bounded_arm - current_arm
         joint_delta: NDArray[np.float64] = np.clip(
-            bounded_arm - current_arm,
+            requested_joint_delta,
             -self._max_joint_delta_rad,
             self._max_joint_delta_rad,
         )
+        if np.any(np.abs(joint_delta - requested_joint_delta) > 1e-12):
+            self._joint_delta_clipped_step_count += 1
         commanded_arm: NDArray[np.float64] = current_arm + joint_delta
+        # Shape `(nq,)` current qpos에 shape `(6,)` 명령 arm을 반영해 FK 오차를 계산
+        commanded_qpos: NDArray[np.float64] = qpos.copy()
+        commanded_qpos[self._arm_qpos_addresses] = commanded_arm
+        self._record_target_error(commanded_qpos, target_position, target_quaternion_wxyz)
         commanded_gripper: float = 1.0 - float(np.clip(frame.trigger, 0.0, 1.0))
         action_values: tuple[float, ...] = (
             *(float(value) for value in commanded_arm),

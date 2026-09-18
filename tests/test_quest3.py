@@ -167,6 +167,44 @@ def _clock(
 class Quest3ActionProducerTest(unittest.TestCase):
     '''착용한 Quest 3 운용의 clutch와 stale-frame safety를 검증한다.'''
 
+    def test_retargeter_diagnostics_reset_per_episode(
+        self,
+    ) -> None:
+        '''IK 진단값이 producer 출력에 전달되고 clutch 재진입이 아닌 episode reset에 초기화되는지 검증한다.'''
+        class DiagnosticRetargeter(FakeRetargeter):
+            '''Fake retargeter에 episode 진단값을 추가한다.'''
+
+            def reset_diagnostics(
+                self,
+            ) -> None:
+                '''이전 episode의 rebase 횟수를 초기화한다.'''
+                self.rebase_count = 0
+
+            def diagnostics(
+                self,
+            ) -> dict[str, object]:
+                '''현재 episode의 rebase 횟수를 반환한다.'''
+                return {'rebase_count': self.rebase_count}
+
+        reader: FakeQuestReader = FakeQuestReader(frames=[
+            _frame(hmd_x_m=0.0, clutch_pressed=True),
+            _frame(hmd_x_m=0.0, clutch_pressed=False),
+            _frame(hmd_x_m=0.0, clutch_pressed=True),
+        ])
+        producer: Quest3ActionProducer = Quest3ActionProducer(
+            reader=reader,
+            retargeter=DiagnosticRetargeter(),
+            clock=_clock,
+        )
+        observation: RobotObservation = RobotObservation(state=(0.0,) * 7)
+        producer.reset(observation)
+        producer.next_action(observation)
+        producer.next_action(observation)
+        producer.next_action(observation)
+        self.assertEqual(producer.diagnostics()['retargeter'], {'rebase_count': 2})
+        producer.reset(observation)
+        self.assertEqual(producer.diagnostics()['retargeter'], {'rebase_count': 0})
+
     def test_connect_waits_for_first_valid_frame(
         self,
     ) -> None:

@@ -191,6 +191,8 @@ MuJoCo target은 I2RT `SimRobot`을 action backend로 사용한다. `display_mod
 
 `quest3_probe.py`는 일상 실행 Notebook에서 호출하지 않는다. Controller motion, trigger, grip 또는 relay camera 광고를 별도로 진단해야 할 때만 command-line에서 실행한다. 일반 실행에서는 `Quest3ActionProducer.connect()`가 첫 유효 `xr_frame`을 기다리므로 Quest Browser WebXR 입력 연결을 `3. Quest 3 및 MuJoCo 연결` cell에서 확인한다.
 
+[`Quest3ActionProducer.diagnostics()`](./yam_control/teleop/quest3.py#L420)의 `retargeter` 항목은 [`YamQuestRetargeter.diagnostics()`](./yam_control/teleop/yam_retargeter.py#L128)를 전달한다. `ik_attempt_count`와 `ik_failure_count`는 IK 시도·실패 횟수, `ik_solve_mean_ms`와 `ik_solve_max_ms`는 IK 계산 시간이다. `joint_delta_clipped_step_count`와 `joint_limit_clipped_step_count`는 각 제한이 적용된 성공한 IK step 수다. `target_to_commanded_ee_position_mean_m/max_m`와 `target_to_commanded_ee_orientation_mean_rad/max_rad`는 reach limit 이후 IK 목표와 최종 명령의 FK 간 거리·회전각이다. 실패 시 반환하는 hold 명령도 포함하며 실제 로봇의 측정 추종 오차나 reach limit 이전 원래 목표의 오차는 아니다. 진단값은 episode마다 초기화하고 clutch 재진입 시에는 유지한다. IK 시도가 없으면 시간·오차는 `None`이다. 오차 계산은 IK 시도마다 FK 1회를 추가하며 이 비용은 control loop processing 시간에 포함되고 IK 계산 시간에는 포함되지 않는다.
+
 구현 위치: [`QuestConfig`](./yam_control/config.py#L53), [`MuJoCo relay`](./yam_control/teleop/mujoco_relay.py#L54), [`Quest Web UI`](./yam_control/teleop/web/index.html#L1), [`Quest client`](./yam_control/teleop/web/quest_client.js#L1), [`WebXR input module`](./yam_control/teleop/web/quest_input.js#L63), [`WebSocketQuestFrameReader`](./yam_control/teleop/quest3.py#L199), [`Quest3ActionProducer`](./yam_control/teleop/quest3.py#L330), [`ClutchPoseMapper`](./yam_control/teleop/clutch_pose_mapper.py#L126), [`YamQuestRetargeter`](./yam_control/teleop/yam_retargeter.py#L63), [`Quest 3 probe`](./yam_control/teleop/quest3_probe.py#L54), [`ClutchPoseMapper test`](./tests/test_clutch_pose_mapper.py#L79), [`MuJoCo relay test`](./tests/test_mujoco_relay.py#L52), [`Quest 3 test`](./tests/test_quest3.py#L167), [`WebXR input self-check`](./tests/quest_input_self_check.cjs#L10), [`YAM retargeter test`](./tests/test_yam_retargeter.py#L17)
 
 ### VLABackend
@@ -225,11 +227,13 @@ Camera 기종이 확정되기 전에는 yam-abc가 요구하는 camera frame enc
 
 실제 robot은 `prepare_episode()`에서 `human_reset_pose`로 이동한 뒤 작업자의 수동 환경 reset을 기다리고 `run_prepared_episode()`에서 `episode_initial_pose`로 이동한 뒤 episode를 시작한다. MuJoCo는 environment와 robot을 자동 reset하고 episode boundary를 유지하면서 연속 실행할 수 있다.
 
+[`RunSession.control_loop_diagnostics()`](./yam_control/session.py#L88)는 마지막 episode의 `completed_step_count`, `mean_processing_ms`, `max_processing_ms`, `mean_tick_period_ms`, `max_tick_period_ms`, `actual_control_hz`를 반환한다. Processing은 observation부터 recording까지, tick period는 sleep까지 포함한다. 초기 pose 이동과 episode 전후 준비·정리는 제외하며 완료한 step이 없으면 시간·주파수는 `None`이다. 기존 sleep 주기나 action 계산은 바꾸지 않고 측정만 추가한다.
+
 구현 위치: [`RunSession`](./yam_control/session.py#L15), [`configuration`](./yam_control/config.py#L178), [`session test`](./tests/test_session.py#L245)
 
 ## Notebook cell 안내
 
-`yam.ipynb`의 최상단 Markdown cell은 프로젝트 루트에서 실행하는 상대경로 기반 LAN HTTPS Quest relay command와 Quest Browser 접속 주소를 안내한다. 이후 각 code cell 앞에 `1. 실행 설정`, `2. Session 생성`, `3. Quest 3 및 MuJoCo 연결`, `4. Episode 초기화`, `5. Teleoperation 실행`, `6. Session 종료` Markdown 이름을 표시한다. 별도 작업자 안내 출력은 생성하지 않으며, `5. Teleoperation 실행`은 episode 결과와 action source 진단값만 표시한다.
+`yam.ipynb`의 최상단 Markdown cell은 프로젝트 루트에서 실행하는 상대경로 기반 LAN HTTPS Quest relay command와 Quest Browser 접속 주소를 안내한다. 이후 각 code cell 앞에 `1. 실행 설정`, `2. Session 생성`, `3. Quest 3 및 MuJoCo 연결`, `4. Episode 초기화`, `5. Teleoperation 실행`, `6. Session 종료` Markdown 이름을 표시한다. 별도 작업자 안내 출력은 생성하지 않으며, `5. Teleoperation 실행`은 episode 결과, `retargeter`를 포함한 action source 진단값과 `control_loop` 시간 통계를 표시한다. MuJoCo 여러 episode 연속 실행 시 진단값은 마지막 episode 기준이다.
 
 `1. 실행 설정` cell은 `MUJOCO_GL='egl'`을 MuJoCo import 전에 설정하고 `QUEST_DISPLAY_MODE='robot_camera'`와 stream parameter를 정의한다. `3. Quest 3 및 MuJoCo 연결` cell에서 Quest용 offscreen stream을 시작하고 첫 유효 Quest input frame을 확인한다. `4. Episode 초기화` cell에서 initial pose와 environment를 reset한 뒤 `5. Teleoperation 실행` cell로 진행한다. `robot_camera` mode에서는 desktop passive viewer를 열지 않는다.
 

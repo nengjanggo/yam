@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import unittest
+import time
+from collections.abc import Callable, Iterator
 
 from yam_control.config import (
     CameraConfig,
@@ -184,6 +186,23 @@ class FakeRecorder:
         self.abort_count += 1
 
 
+class FakeClock:
+    '''제어 step 경계에 결정적인 시각을 제공한다.'''
+
+    def __init__(
+        self,
+        times_s: tuple[float, ...],
+    ) -> None:
+        '''호출 순서대로 반환할 시각을 저장한다.'''
+        self._times_s: Iterator[float] = iter(times_s)
+
+    def __call__(
+        self,
+    ) -> float:
+        '''다음 시각을 반환한다.'''
+        return next(self._times_s)
+
+
 def _no_sleep(
     duration_s: float,
 ) -> None:
@@ -225,6 +244,7 @@ def _build_session(
     robot: FakeRobot,
     safety_gate: FakeSafetyGate,
     recorder: FakeRecorder,
+    clock: Callable[[], float] = time.perf_counter,
 ) -> RunSession:
     '''주어진 fake component로 hardware-free RunSession을 생성한다.'''
     action: RobotAction = RobotAction(values=(0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.0))
@@ -236,6 +256,7 @@ def _build_session(
         safety_gate=safety_gate,
         recorder=recorder,
         sleeper=_no_sleep,
+        clock=clock,
     )
 
 
@@ -299,6 +320,39 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(state, EpisodeState.ABORTED)
         self.assertEqual(execute_count, 0)
         self.assertEqual(recorder.abort_count, 1)
+        self.assertEqual(session.control_loop_diagnostics()['completed_step_count'], 0)
+        self.assertIsNone(session.control_loop_diagnostics()['actual_control_hz'])
+
+    def test_control_loop_diagnostics_exclude_setup_and_reset_per_episode(
+        self,
+    ) -> None:
+        '''완료된 step의 처리·sleep 포함 주기만 집계하고 다음 episode에서 초기화한다.'''
+        config: RunConfig = _build_config(execution_target='mujoco')
+        robot: FakeRobot = FakeRobot()
+        recorder: FakeRecorder = FakeRecorder()
+        clock: FakeClock = FakeClock((0.0, 0.01, 0.04, 0.04, 0.07, 0.10, 1.0, 1.005, 1.025))
+        session: RunSession = _build_session(config, robot, FakeSafetyGate(True), recorder, clock)
+
+        session.connect()
+        session.prepare_episode()
+        session.run_prepared_episode(max_steps=2)
+        first: dict[str, int | float | None] = session.control_loop_diagnostics()
+
+        self.assertEqual(first['completed_step_count'], 2)
+        self.assertAlmostEqual(first['mean_processing_ms'], 20.0)
+        self.assertAlmostEqual(first['max_processing_ms'], 30.0)
+        self.assertAlmostEqual(first['mean_tick_period_ms'], 50.0)
+        self.assertAlmostEqual(first['max_tick_period_ms'], 60.0)
+        self.assertAlmostEqual(first['actual_control_hz'], 20.0)
+
+        session.prepare_episode()
+        session.run_prepared_episode(max_steps=1)
+        second: dict[str, int | float | None] = session.control_loop_diagnostics()
+
+        self.assertEqual(second['completed_step_count'], 1)
+        self.assertAlmostEqual(second['mean_processing_ms'], 5.0)
+        self.assertAlmostEqual(second['mean_tick_period_ms'], 25.0)
+        self.assertAlmostEqual(second['actual_control_hz'], 40.0)
 
 
 if __name__ == '__main__':
