@@ -4,5 +4,5 @@
 __pycache__/
 *.py[cod]
 checkpoints/
-data/
+/data/
 *.pem
