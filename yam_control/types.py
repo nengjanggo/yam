@@ -14,7 +14,16 @@ class EpisodeState(Enum):
     PREPARED = 'prepared'
     RUNNING = 'running'
     FINISHED = 'finished'
+    SUCCEEDED = 'succeeded'
+    DISCARDED = 'discarded'
     ABORTED = 'aborted'
+
+
+class EpisodeOutcome(Enum):
+    '''작업자가 episode 도중 입력한 조기 종료 결과를 나타낸다.'''
+
+    SUCCESS = 'success'
+    FAILURE = 'failure'
 
 
 @dataclass(frozen=True)
@@ -64,6 +73,8 @@ class QuestFrame:
     trigger: float
     clutch_pressed: bool
     timestamp_s: float
+    primary_button_pressed: bool = False
+    secondary_button_pressed: bool = False
 
 
 @dataclass(frozen=True)

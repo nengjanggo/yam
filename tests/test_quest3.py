@@ -14,7 +14,7 @@ from yam_control.teleop.quest3 import (
     parse_quest_frame_payload,
 )
 from yam_control.teleop.quest3_probe import _summarize_frames
-from yam_control.types import QuestFrame, QuestPose, RobotAction, RobotObservation
+from yam_control.types import EpisodeOutcome, QuestFrame, QuestPose, RobotAction, RobotObservation
 
 
 class FakeQuestReader:
@@ -158,6 +158,44 @@ def _frame(
     )
 
 
+def _button_frame(
+    primary_pressed: bool,
+    secondary_pressed: bool,
+    clutch_pressed: bool = True,
+) -> QuestFrame:
+    '''지정된 A/X, B/Y button 상태의 QuestFrame을 생성한다.'''
+    frame: QuestFrame = _frame(hmd_x_m=0.0, clutch_pressed=clutch_pressed)
+    return QuestFrame(
+        controller_pose=frame.controller_pose,
+        hmd_pose=frame.hmd_pose,
+        trigger=frame.trigger,
+        clutch_pressed=frame.clutch_pressed,
+        timestamp_s=frame.timestamp_s,
+        primary_button_pressed=primary_pressed,
+        secondary_button_pressed=secondary_pressed,
+    )
+
+
+def _run_button_frames(
+    frames: list[QuestFrame],
+) -> list[EpisodeOutcome | None]:
+    '''Reset 후 frame마다 next_action을 호출하고 episode_outcome 변화를 반환한다.'''
+    producer: Quest3ActionProducer = Quest3ActionProducer(
+        reader=FakeQuestReader(frames=frames),
+        retargeter=FakeRetargeter(),
+        clock=_clock,
+    )
+    observation: RobotObservation = RobotObservation(state=(0.0,) * 7)
+    producer.reset(observation)
+    outcomes: list[EpisodeOutcome | None] = []
+    frame: QuestFrame
+    for frame in frames:
+        del frame
+        producer.next_action(observation)
+        outcomes.append(producer.episode_outcome)
+    return outcomes
+
+
 def _clock(
 ) -> float:
     '''Frame timestamp와 동일한 monotonic test 시간을 반환한다.'''
@@ -253,6 +291,67 @@ class Quest3ActionProducerTest(unittest.TestCase):
         self.assertEqual(diagnostics['changed_action_step_count'], 2)
         self.assertEqual(diagnostics['hold_reason_counts'], {})
 
+    def test_primary_button_press_marks_success(
+        self,
+    ) -> None:
+        '''A/X button을 새로 누르면 clutch와 무관하게 성공 episode로 기록하는지 검증한다.'''
+        outcomes: list[EpisodeOutcome | None] = _run_button_frames([
+            _button_frame(primary_pressed=False, secondary_pressed=False),
+            _button_frame(primary_pressed=True, secondary_pressed=False, clutch_pressed=False),
+            _button_frame(primary_pressed=False, secondary_pressed=True),
+        ])
+
+        self.assertEqual(outcomes, [None, EpisodeOutcome.SUCCESS, EpisodeOutcome.SUCCESS])
+
+    def test_secondary_button_press_marks_failure(
+        self,
+    ) -> None:
+        '''B/Y button을 새로 누르면 실패로 기록하고 동시 입력에서는 실패를 우선하는지 검증한다.'''
+        failure_outcomes: list[EpisodeOutcome | None] = _run_button_frames([
+            _button_frame(primary_pressed=False, secondary_pressed=False),
+            _button_frame(primary_pressed=False, secondary_pressed=True),
+        ])
+        simultaneous_outcomes: list[EpisodeOutcome | None] = _run_button_frames([
+            _button_frame(primary_pressed=False, secondary_pressed=False),
+            _button_frame(primary_pressed=True, secondary_pressed=True),
+        ])
+
+        self.assertEqual(failure_outcomes, [None, EpisodeOutcome.FAILURE])
+        self.assertEqual(simultaneous_outcomes, [None, EpisodeOutcome.FAILURE])
+
+    def test_button_held_from_episode_start_requires_release(
+        self,
+    ) -> None:
+        '''Episode 시작 전부터 누르고 있던 button은 release 후 다시 눌러야 인정하는지 검증한다.'''
+        outcomes: list[EpisodeOutcome | None] = _run_button_frames([
+            _button_frame(primary_pressed=True, secondary_pressed=False),
+            _button_frame(primary_pressed=True, secondary_pressed=False),
+            _button_frame(primary_pressed=False, secondary_pressed=False),
+            _button_frame(primary_pressed=True, secondary_pressed=False),
+        ])
+
+        self.assertEqual(outcomes, [None, None, None, EpisodeOutcome.SUCCESS])
+
+    def test_stale_frame_button_is_ignored(
+        self,
+    ) -> None:
+        '''Stale frame의 button 입력은 episode 종료로 인정하지 않는지 검증한다.'''
+        stale_frame: QuestFrame = _button_frame(primary_pressed=True, secondary_pressed=False)
+        stale_frame = QuestFrame(
+            controller_pose=stale_frame.controller_pose,
+            hmd_pose=stale_frame.hmd_pose,
+            trigger=stale_frame.trigger,
+            clutch_pressed=stale_frame.clutch_pressed,
+            timestamp_s=0.0,
+            primary_button_pressed=True,
+        )
+        outcomes: list[EpisodeOutcome | None] = _run_button_frames([
+            _button_frame(primary_pressed=False, secondary_pressed=False),
+            stale_frame,
+        ])
+
+        self.assertEqual(outcomes, [None, None])
+
     def test_parse_quest_frame_payload(
         self,
     ) -> None:
@@ -286,6 +385,44 @@ class Quest3ActionProducerTest(unittest.TestCase):
         self.assertEqual(frame.trigger, 0.75)
         self.assertTrue(frame.clutch_pressed)
         self.assertEqual(frame.timestamp_s, 12.5)
+        self.assertFalse(frame.primary_button_pressed)
+        self.assertFalse(frame.secondary_button_pressed)
+
+    def test_parse_quest_frame_payload_reads_a_and_b_buttons(
+        self,
+    ) -> None:
+        '''xr-standard button index 4와 5를 A/X와 B/Y 입력으로 변환하는지 검증한다.'''
+        released: dict[str, object] = {'p': False, 't': False, 'v': 0.0}
+        payload: dict[str, object] = {
+            'type': 'xr_frame',
+            'controllers': {
+                'right': {
+                    'position': [0.0, 0.0, 0.0],
+                    'orientation': [0.0, 0.0, 0.0, 1.0],
+                    'buttons': [
+                        released,
+                        released,
+                        released,
+                        released,
+                        {'p': True, 't': True, 'v': 1.0},
+                        released,
+                    ],
+                },
+            },
+            'viewer': {
+                'position': [0.0, 0.0, 0.0],
+                'orientation': [0.0, 0.0, 0.0, 1.0],
+            },
+        }
+
+        frame: QuestFrame = parse_quest_frame_payload(
+            payload=payload,
+            controller_hand='right',
+            received_timestamp_s=1.0,
+        )
+
+        self.assertTrue(frame.primary_button_pressed)
+        self.assertFalse(frame.secondary_button_pressed)
 
     def test_probe_summary_allows_worn_hmd_motion(
         self,

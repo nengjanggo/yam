@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, TypeAlias
 
 RunMode: TypeAlias = Literal['teleop', 'inference']
@@ -11,6 +11,8 @@ VLAType: TypeAlias = Literal['pi0', 'pi0.5', 'groot']
 ExecutionTarget: TypeAlias = Literal['real', 'mujoco']
 QuestDisplayMode: TypeAlias = Literal['none', 'status', 'robot_camera']
 QuestControllerHand: TypeAlias = Literal['left', 'right']
+CameraRole: TypeAlias = Literal['top', 'wrist']
+CameraFitMode: TypeAlias = Literal['center_crop', 'zero_pad']
 
 
 def _validate_pose(
@@ -63,6 +65,7 @@ class QuestConfig:
     position_reach_limit_m: float = 0.10
     rotation_reach_limit_rad: float = 0.35
     max_joint_delta_rad: float = 0.04
+    ik_orientation_cost: float = 0.3
     max_frame_age_s: float = 0.25
     stream_frame_path: str = '/tmp/yam-mujoco-frame.jpg'
     stream_width: int = 640
@@ -91,6 +94,7 @@ class QuestConfig:
             ('position_reach_limit_m', self.position_reach_limit_m),
             ('rotation_reach_limit_rad', self.rotation_reach_limit_rad),
             ('max_joint_delta_rad', self.max_joint_delta_rad),
+            ('ik_orientation_cost', self.ik_orientation_cost),
             ('max_frame_age_s', self.max_frame_age_s),
         )
         field_name: str
@@ -118,10 +122,68 @@ class QuestConfig:
 
 
 @dataclass(frozen=True)
-class CameraConfig:
-    '''Camera 기종 확정 전에도 policy가 요구하는 camera role을 표현한다.'''
+class CameraDeviceConfig:
+    '''V4L2 RGB camera 하나의 capture 설정과 정사각형 output 변환 방식을 정의한다.'''
 
-    roles: tuple[str, ...] = ()
+    role: CameraRole
+    device_path: str
+    capture_width: int = 960
+    capture_height: int = 540
+    capture_fps: int = 30
+    pixel_format: str = 'YUYV'
+    fit_mode: CameraFitMode = 'center_crop'
+    output_size: int = 224
+
+    def __post_init__(
+        self,
+    ) -> None:
+        '''Camera role, device path, capture 값과 output 변환 방식을 검증한다.'''
+        if self.role not in ('top', 'wrist'):
+            raise ValueError(f'unsupported camera role: {self.role}')
+        if not self.device_path:
+            raise ValueError('device_path must not be empty')
+        positive_values: tuple[tuple[str, int], ...] = (
+            ('capture_width', self.capture_width),
+            ('capture_height', self.capture_height),
+            ('capture_fps', self.capture_fps),
+            ('output_size', self.output_size),
+        )
+        field_name: str
+        value: int
+        for field_name, value in positive_values:
+            if value <= 0:
+                raise ValueError(f'{field_name} must be positive')
+        if len(self.pixel_format) != 4:
+            raise ValueError('pixel_format must be a four-character code')
+        if self.fit_mode not in ('center_crop', 'zero_pad'):
+            raise ValueError(f'unsupported camera fit_mode: {self.fit_mode}')
+
+
+@dataclass(frozen=True)
+class CameraConfig:
+    '''Observation과 recorder가 사용하는 camera 목록, 노출 안정화 시간과 frame 신선도 제한을 정의한다.'''
+
+    devices: tuple[CameraDeviceConfig, ...] = ()
+    settle_time_s: float = 1.0
+    max_frame_age_s: float = 0.5
+
+    def __post_init__(
+        self,
+    ) -> None:
+        '''Camera role이 중복되지 않고 시간 값이 유효한지 검증한다.'''
+        if len(set(self.roles)) != len(self.roles):
+            raise ValueError(f'camera roles must be unique, got {self.roles}')
+        if self.settle_time_s < 0.0:
+            raise ValueError('settle_time_s must be non-negative')
+        if self.max_frame_age_s <= 0.0:
+            raise ValueError('max_frame_age_s must be positive')
+
+    @property
+    def roles(
+        self,
+    ) -> tuple[CameraRole, ...]:
+        '''설정된 camera role을 device 순서대로 반환한다.'''
+        return tuple(device.role for device in self.devices)
 
 
 @dataclass(frozen=True)
@@ -245,9 +307,10 @@ def build_run_config(
     mode_config: ModeConfig
     if mode == 'teleop':
         # Teleoperation에서는 전역 USE_RTC 값을 의도적으로 무시
+        # MuJoCo joint와 실제 camera image가 섞이지 않도록 MuJoCo에서는 SAVE_TELEOP_DATA를 무시
         mode_config = TeleopRunConfig(
             teleop_source=teleop_source,
-            save_teleop_data=save_teleop_data,
+            save_teleop_data=save_teleop_data and execution_target == 'real',
         )
     else:
         mode_config = InferenceRunConfig(
@@ -262,4 +325,15 @@ def build_run_config(
         common=common,
         task_prompt=task_prompt,
         data_root=data_root,
+    )
+
+
+def with_camera_config(
+    config: RunConfig,
+    camera: CameraConfig,
+) -> RunConfig:
+    '''RunConfig의 camera configuration만 교체한 새 RunConfig를 반환한다.'''
+    return replace(
+        config,
+        common=replace(config.common, camera=camera),
     )

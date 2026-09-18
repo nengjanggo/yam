@@ -171,3 +171,174 @@ def test_quest_stream_skips_passive_viewer(
 
     connect_stream_renderer.assert_called_once_with()
     launch_passive.assert_not_called()
+
+
+class FakeCamera:
+    '''Hardware 없이 camera lifecycle event와 고정 frame을 제공한다.'''
+
+    def __init__(
+        self,
+        events: list[str],
+    ) -> None:
+        '''Robot과 공유하는 event list를 저장한다.'''
+        self.events: list[str] = events
+
+    def connect(
+        self,
+    ) -> None:
+        '''Camera connect event를 기록한다.'''
+        self.events.append('camera.connect')
+
+    def read_frames(
+        self,
+    ) -> Mapping[str, object]:
+        '''Top role frame placeholder를 반환한다.'''
+        return {'top': 'frame'}
+
+    def close(
+        self,
+    ) -> None:
+        '''Camera close event를 기록한다.'''
+        self.events.append('camera.close')
+
+
+def test_backend_connects_camera_before_robot_and_adds_frames(
+) -> None:
+    '''Camera를 robot보다 먼저 연결하고 observation image에 frame을 넣는지 검증한다.'''
+    events: list[str] = []
+
+    def load_robot(
+        robot_config: RobotConfig,
+        execution_target: ExecutionTarget,
+    ) -> I2RTRobot:
+        '''Robot load event를 기록하고 fake robot을 반환한다.'''
+        events.append('robot.load')
+        return _load_fake_robot(robot_config, execution_target)
+
+    backend: I2RTRobotBackend = I2RTRobotBackend(
+        config=RobotConfig(),
+        execution_target='mujoco',
+        loader=load_robot,
+        vector_converter=_identity_vector,
+        camera=FakeCamera(events),
+    )
+
+    backend.connect()
+    images: Mapping[str, object] = backend.get_observation().images
+    backend.close()
+
+    assert events == ['camera.connect', 'robot.load', 'camera.close']
+    assert images == {'top': 'frame'}
+
+
+def test_backend_closes_camera_when_robot_load_fails(
+) -> None:
+    '''Robot 생성 실패 시 이미 연결한 camera를 해제하는지 검증한다.'''
+    events: list[str] = []
+    backend: I2RTRobotBackend = I2RTRobotBackend(
+        config=RobotConfig(),
+        execution_target='real',
+        loader=_load_fake_robot,
+        vector_converter=_identity_vector,
+        camera=FakeCamera(events),
+    )
+
+    try:
+        backend.connect()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('robot load failure must propagate')
+
+    assert events == ['camera.connect', 'camera.close']
+
+
+class FakeMotorChain:
+    '''I2RT motor chain의 running flag만 흉내 낸다.'''
+
+    def __init__(
+        self,
+    ) -> None:
+        '''Running 상태로 시작한다.'''
+        self.running: bool = True
+
+
+class FakeRealI2RTRobot(FakeI2RTRobot):
+    '''Motor chain과 server thread 상태를 가진 real robot을 흉내 낸다.'''
+
+    def __init__(
+        self,
+    ) -> None:
+        '''Running motor chain과 살아 있는 server thread 상태를 생성한다.'''
+        super().__init__()
+        self.motor_chain: FakeMotorChain = FakeMotorChain()
+        self._server_thread: FakeThread = FakeThread()
+
+
+class FakeThread:
+    '''Thread의 is_alive 상태만 흉내 낸다.'''
+
+    def __init__(
+        self,
+    ) -> None:
+        '''살아 있는 상태로 시작한다.'''
+        self.alive: bool = True
+
+    def is_alive(
+        self,
+    ) -> bool:
+        '''현재 alive 상태를 반환한다.'''
+        return self.alive
+
+
+def _build_real_backend(
+    robot: FakeRealI2RTRobot,
+) -> I2RTRobotBackend:
+    '''주어진 fake real robot을 반환하는 backend를 생성한다.'''
+    return I2RTRobotBackend(
+        config=RobotConfig(),
+        execution_target='real',
+        loader=lambda robot_config, execution_target: robot,
+        vector_converter=_identity_vector,
+    )
+
+
+def test_backend_rejects_stopped_motor_chain(
+) -> None:
+    '''I2RT motor chain loop가 멈추면 observation과 command를 거부하고 close는 허용하는지 검증한다.'''
+    robot: FakeRealI2RTRobot = FakeRealI2RTRobot()
+    backend: I2RTRobotBackend = _build_real_backend(robot)
+    backend.connect()
+    backend.get_observation()
+
+    robot.motor_chain.running = False
+
+    for call in (
+        backend.get_observation,
+        lambda: backend.execute(RobotAction(values=robot.state)),
+    ):
+        try:
+            call()
+        except RuntimeError as error:
+            assert 'motor chain' in str(error)
+        else:
+            raise AssertionError('stopped motor chain must be rejected')
+    backend.close()
+    assert robot.closed
+
+
+def test_backend_rejects_stopped_server_thread(
+) -> None:
+    '''I2RT robot server thread가 멈추면 command를 거부하는지 검증한다.'''
+    robot: FakeRealI2RTRobot = FakeRealI2RTRobot()
+    backend: I2RTRobotBackend = _build_real_backend(robot)
+    backend.connect()
+
+    robot._server_thread.alive = False
+
+    try:
+        backend.execute(RobotAction(values=robot.state))
+    except RuntimeError as error:
+        assert 'server thread' in str(error)
+    else:
+        raise AssertionError('stopped server thread must be rejected')

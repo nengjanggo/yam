@@ -8,6 +8,8 @@ from typing import cast
 from yam_control import create_session
 from yam_control.config import (
     CameraConfig,
+    CameraDeviceConfig,
+    ExecutionTarget,
     InferenceRunConfig,
     QuestConfig,
     RobotConfig,
@@ -15,24 +17,27 @@ from yam_control.config import (
     RunMode,
     TeleopRunConfig,
     build_run_config,
+    with_camera_config,
 )
 
 
 def _build_config(
     mode: RunMode,
     use_rtc: bool,
+    save_teleop_data: bool = False,
+    execution_target: ExecutionTarget = 'mujoco',
 ) -> RunConfig:
     '''Test에 필요한 최소 RunConfig를 생성한다.'''
     return build_run_config(
         mode=mode,
         teleop_source='quest3',
-        save_teleop_data=False,
+        save_teleop_data=save_teleop_data,
         vla_type='pi0.5',
         checkpoint_uri='checkpoint',
         checkpoint_revision=None,
         policy_config_name='pi05_yam',
         use_rtc=use_rtc,
-        execution_target='mujoco',
+        execution_target=execution_target,
         use_safety_gate=False,
         control_hz=30.0,
         task_prompt='pick up the object',
@@ -65,6 +70,43 @@ class ConfigTest(unittest.TestCase):
 
         self.assertEqual(mode_config.vla_type, 'pi0.5')
         self.assertTrue(config.rtc_enabled)
+
+    def test_mujoco_ignores_save_teleop_data(
+        self,
+    ) -> None:
+        '''MuJoCo에서는 SAVE_TELEOP_DATA가 True여도 recording을 끄는지 검증한다.'''
+        config: RunConfig = _build_config(mode='teleop', use_rtc=False, save_teleop_data=True)
+        mode_config: TeleopRunConfig = cast(TeleopRunConfig, config.mode_config)
+
+        self.assertFalse(mode_config.save_teleop_data)
+
+    def test_real_keeps_save_teleop_data(
+        self,
+    ) -> None:
+        '''Real robot에서는 SAVE_TELEOP_DATA 값을 유지하는지 검증한다.'''
+        config: RunConfig = _build_config(
+            mode='teleop',
+            use_rtc=False,
+            save_teleop_data=True,
+            execution_target='real',
+        )
+        mode_config: TeleopRunConfig = cast(TeleopRunConfig, config.mode_config)
+
+        self.assertTrue(mode_config.save_teleop_data)
+
+    def test_with_camera_config_replaces_only_camera(
+        self,
+    ) -> None:
+        '''Camera configuration만 교체하고 나머지 configuration은 유지하는지 검증한다.'''
+        config: RunConfig = _build_config(mode='teleop', use_rtc=False)
+        camera: CameraConfig = CameraConfig(
+            devices=(CameraDeviceConfig(role='top', device_path='/dev/fake-top'),),
+        )
+        updated: RunConfig = with_camera_config(config, camera)
+
+        self.assertEqual(updated.common.camera.roles, ('top',))
+        self.assertEqual(updated.common.quest, config.common.quest)
+        self.assertEqual(updated.mode_config, config.mode_config)
 
     def test_pose_requires_seven_values(
         self,

@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterator, Mapping
 from typing import Protocol, cast
 
 from ..config import QuestControllerHand
-from ..types import QuestFrame, QuestPose, RobotAction, RobotObservation
+from ..types import EpisodeOutcome, QuestFrame, QuestPose, RobotAction, RobotObservation
 
 
 class WebSocketConnection(Protocol):
@@ -30,6 +30,10 @@ class WebSocketConnection(Protocol):
 
 
 WebSocketConnector = Callable[[str, ssl.SSLContext | None, float], WebSocketConnection]
+
+# WebXR xr-standard gamepad mapping에서 Quest Touch controller의 A/X와 B/Y button index
+PRIMARY_BUTTON_INDEX: int = 4
+SECONDARY_BUTTON_INDEX: int = 5
 
 
 def create_websocket_ssl_context(
@@ -128,7 +132,22 @@ def parse_quest_frame_payload(
         trigger=trigger,
         clutch_pressed=bool(clutch_button.get('p', False)),
         timestamp_s=received_timestamp_s,
+        primary_button_pressed=_button_pressed(buttons, PRIMARY_BUTTON_INDEX),
+        secondary_button_pressed=_button_pressed(buttons, SECONDARY_BUTTON_INDEX),
     )
+
+
+def _button_pressed(
+    buttons: list[object],
+    index: int,
+) -> bool:
+    '''Gamepad button list에서 index button이 있고 눌렸으면 True를 반환한다.'''
+    if index >= len(buttons):
+        return False
+    button: object = buttons[index]
+    if not isinstance(button, Mapping):
+        raise ValueError('controller button entries must be objects')
+    return bool(button.get('p', False))
 
 
 def _has_required_tracking_data(
@@ -328,7 +347,7 @@ class WebSocketQuestFrameReader:
 
 
 class Quest3ActionProducer:
-    '''Clutch-relative mapping과 stale-frame safety를 적용한다.'''
+    '''Clutch-relative mapping, stale-frame safety와 A/B button episode 종료 입력을 적용한다.'''
 
     def __init__(
         self,
@@ -347,6 +366,10 @@ class Quest3ActionProducer:
         self._engaged: bool = False
         self._reengage_required: bool = False
         self.last_hold_reason: str | None = None
+        self.episode_outcome: EpisodeOutcome | None = None
+        # Episode 시작 전부터 누르고 있던 button은 한 번 release해야 입력으로 인정
+        self._primary_button_was_pressed: bool = True
+        self._secondary_button_was_pressed: bool = True
         self._hold_reason_counts: dict[str, int] = {}
         self._clutch_control_step_count: int = 0
         self._changed_action_step_count: int = 0
@@ -363,13 +386,16 @@ class Quest3ActionProducer:
         self,
         observation: RobotObservation,
     ) -> None:
-        '''Episode마다 clutch 상태와 optional retargeter 진단값을 초기화한다.'''
+        '''Episode마다 clutch, episode 종료 입력과 optional retargeter 진단값을 초기화한다.'''
         reset_diagnostics: object = getattr(self._retargeter, 'reset_diagnostics', None)
         if callable(reset_diagnostics):
             reset_diagnostics()
         self._engaged = False
         self._reengage_required = False
         self.last_hold_reason = None
+        self.episode_outcome = None
+        self._primary_button_was_pressed = True
+        self._secondary_button_was_pressed = True
         self._hold_reason_counts = {}
         self._clutch_control_step_count = 0
         self._changed_action_step_count = 0
@@ -385,6 +411,23 @@ class Quest3ActionProducer:
         self._hold_reason_counts[reason] = self._hold_reason_counts.get(reason, 0) + 1
         return RobotAction(values=observation.state)
 
+    def _update_episode_outcome(
+        self,
+        frame: QuestFrame,
+    ) -> None:
+        '''A/X button의 새 press를 성공, B/Y button의 새 press를 실패 episode로 기록한다.'''
+        primary_pressed_now: bool = frame.primary_button_pressed and not self._primary_button_was_pressed
+        secondary_pressed_now: bool = frame.secondary_button_pressed and not self._secondary_button_was_pressed
+        self._primary_button_was_pressed = frame.primary_button_pressed
+        self._secondary_button_was_pressed = frame.secondary_button_pressed
+        if self.episode_outcome is not None:
+            return
+        # 두 button이 같은 frame에서 눌리면 저장하지 않는 실패를 우선
+        if secondary_pressed_now:
+            self.episode_outcome = EpisodeOutcome.FAILURE
+        elif primary_pressed_now:
+            self.episode_outcome = EpisodeOutcome.SUCCESS
+
     def next_action(
         self,
         observation: RobotObservation,
@@ -396,6 +439,7 @@ class Quest3ActionProducer:
             self._engaged = False
             self._reengage_required = True
             return self._hold(observation, 'stale Quest frame')
+        self._update_episode_outcome(frame)
         if not frame.clutch_pressed:
             self._engaged = False
             self._reengage_required = False
@@ -431,6 +475,7 @@ class Quest3ActionProducer:
             'max_action_delta': self._max_action_delta,
             'hold_reason_counts': dict(self._hold_reason_counts),
             'last_hold_reason': self.last_hold_reason,
+            'episode_outcome': None if self.episode_outcome is None else self.episode_outcome.value,
             'reader': self._reader.diagnostics(),
             'retargeter': dict(retargeter_diagnostics),
         }

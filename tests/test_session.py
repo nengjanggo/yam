@@ -15,7 +15,7 @@ from yam_control.config import (
     build_run_config,
 )
 from yam_control.session import RunSession
-from yam_control.types import EpisodeState, RobotAction, RobotObservation, SafetyDecision
+from yam_control.types import EpisodeOutcome, EpisodeState, RobotAction, RobotObservation, SafetyDecision
 
 
 class FakeRobot:
@@ -113,6 +113,92 @@ class FakeActionProducer:
         self,
     ) -> None:
         '''Fake producer는 해제할 resource가 없다.'''
+
+
+class HoldingActionProducer(FakeActionProducer):
+    '''정해진 step에서 clutch release hold 사유를 노출하는 action source이다.'''
+
+    def __init__(
+        self,
+        action: RobotAction,
+        holding_steps: tuple[bool, ...],
+    ) -> None:
+        '''Step별 hold 여부와 고정 action을 저장한다.'''
+        super().__init__(action=action)
+        self._holding_steps: Iterator[bool] = iter(holding_steps)
+        self.last_hold_reason: str | None = None
+
+    def next_action(
+        self,
+        observation: RobotObservation,
+    ) -> RobotAction:
+        '''Hold step이면 현재 state를, 아니면 고정 action을 반환한다.'''
+        if next(self._holding_steps):
+            self.last_hold_reason = 'clutch released'
+            return RobotAction(values=observation.state)
+        self.last_hold_reason = None
+        return super().next_action(observation)
+
+
+class OutcomeActionProducer(FakeActionProducer):
+    '''지정한 step에서 작업자의 episode 종료 입력을 노출하는 action source이다.'''
+
+    def __init__(
+        self,
+        action: RobotAction,
+        outcome: EpisodeOutcome,
+        outcome_at_step: int,
+    ) -> None:
+        '''종료 입력 종류와 입력이 발생할 step index를 저장한다.'''
+        super().__init__(action=action)
+        self._outcome: EpisodeOutcome = outcome
+        self._outcome_at_step: int = outcome_at_step
+        self._step_index: int = 0
+        self.episode_outcome: EpisodeOutcome | None = None
+
+    def reset(
+        self,
+        observation: RobotObservation,
+    ) -> None:
+        '''Episode 종료 입력과 step index를 초기화한다.'''
+        super().reset(observation)
+        self._step_index = 0
+        self.episode_outcome = None
+
+    def next_action(
+        self,
+        observation: RobotObservation,
+    ) -> RobotAction:
+        '''지정한 step부터 episode 종료 입력을 기록한다.'''
+        if self._step_index == self._outcome_at_step:
+            self.episode_outcome = self._outcome
+        self._step_index += 1
+        return super().next_action(observation)
+
+
+class FailingActionProducer(FakeActionProducer):
+    '''지정한 step에서 예외를 발생시키는 action source이다.'''
+
+    def __init__(
+        self,
+        action: RobotAction,
+        fail_at_step: int,
+    ) -> None:
+        '''예외를 발생시킬 step index를 저장한다.'''
+        super().__init__(action=action)
+        self._fail_at_step: int = fail_at_step
+        self._step_index: int = 0
+
+    def next_action(
+        self,
+        observation: RobotObservation,
+    ) -> RobotAction:
+        '''지정한 step에서 RuntimeError를 발생시킨다.'''
+        step_index: int = self._step_index
+        self._step_index += 1
+        if step_index == self._fail_at_step:
+            raise RuntimeError('controller disconnected')
+        return super().next_action(observation)
 
 
 class FakeSafetyGate:
@@ -239,16 +325,20 @@ def _build_config(
     )
 
 
+FIXED_ACTION: RobotAction = RobotAction(values=(0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.0))
+
+
 def _build_session(
     config: RunConfig,
     robot: FakeRobot,
     safety_gate: FakeSafetyGate,
     recorder: FakeRecorder,
     clock: Callable[[], float] = time.perf_counter,
+    producer: FakeActionProducer | None = None,
 ) -> RunSession:
     '''주어진 fake component로 hardware-free RunSession을 생성한다.'''
-    action: RobotAction = RobotAction(values=(0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.0))
-    producer: FakeActionProducer = FakeActionProducer(action=action)
+    if producer is None:
+        producer = FakeActionProducer(action=FIXED_ACTION)
     return RunSession(
         config=config,
         robot=robot,
@@ -353,6 +443,198 @@ class SessionTest(unittest.TestCase):
         self.assertAlmostEqual(second['mean_processing_ms'], 5.0)
         self.assertAlmostEqual(second['mean_tick_period_ms'], 25.0)
         self.assertAlmostEqual(second['actual_control_hz'], 40.0)
+
+
+class SessionRecordingTest(unittest.TestCase):
+    '''Hold step recording 제외와 예외 시 recorder 정리를 검증한다.'''
+
+    def test_holding_steps_are_executed_but_not_recorded(
+        self,
+    ) -> None:
+        '''Clutch release hold step은 robot에 실행하되 recording에서 제외하는지 검증한다.'''
+        config: RunConfig = _build_config(execution_target='mujoco')
+        robot: FakeRobot = FakeRobot()
+        recorder: FakeRecorder = FakeRecorder()
+        producer: HoldingActionProducer = HoldingActionProducer(
+            action=FIXED_ACTION,
+            holding_steps=(True, False, False, True, False),
+        )
+        session: RunSession = _build_session(
+            config,
+            robot,
+            FakeSafetyGate(True),
+            recorder,
+            producer=producer,
+        )
+
+        session.connect()
+        session.prepare_episode()
+        state: EpisodeState = session.run_prepared_episode(max_steps=5)
+        diagnostics: dict[str, int | float | None] = session.control_loop_diagnostics()
+        execute_count: int = sum(event[0] == 'execute' for event in robot.events)
+
+        self.assertEqual(state, EpisodeState.FINISHED)
+        self.assertEqual(recorder.record_count, 3)
+        self.assertEqual(recorder.finish_count, 1)
+        self.assertEqual(diagnostics['completed_step_count'], 5)
+        self.assertEqual(diagnostics['recorded_step_count'], 3)
+        self.assertGreaterEqual(execute_count, 5)
+
+    def test_exception_aborts_recording_and_allows_next_episode(
+        self,
+    ) -> None:
+        '''Control loop 예외 시 recorder를 abort하고 예외를 다시 발생시키는지 검증한다.'''
+        config: RunConfig = _build_config(execution_target='mujoco')
+        robot: FakeRobot = FakeRobot()
+        recorder: FakeRecorder = FakeRecorder()
+        producer: FailingActionProducer = FailingActionProducer(action=FIXED_ACTION, fail_at_step=1)
+        session: RunSession = _build_session(
+            config,
+            robot,
+            FakeSafetyGate(True),
+            recorder,
+            producer=producer,
+        )
+
+        session.connect()
+        session.prepare_episode()
+        with self.assertRaisesRegex(RuntimeError, 'controller disconnected'):
+            session.run_prepared_episode(max_steps=3)
+
+        self.assertEqual(session.state, EpisodeState.ABORTED)
+        self.assertEqual(recorder.record_count, 1)
+        self.assertEqual(recorder.abort_count, 1)
+        self.assertEqual(recorder.finish_count, 0)
+
+        session.prepare_episode()
+        state: EpisodeState = session.run_prepared_episode(max_steps=1)
+
+        self.assertEqual(state, EpisodeState.FINISHED)
+        self.assertEqual(recorder.start_count, 2)
+
+    def test_success_button_finishes_and_saves_early(
+        self,
+    ) -> None:
+        '''성공 입력 step은 실행하지 않고 그 전까지를 저장하며 SUCCEEDED로 끝나는지 검증한다.'''
+        config: RunConfig = _build_config(execution_target='mujoco')
+        robot: FakeRobot = FakeRobot()
+        recorder: FakeRecorder = FakeRecorder()
+        producer: OutcomeActionProducer = OutcomeActionProducer(
+            action=FIXED_ACTION,
+            outcome=EpisodeOutcome.SUCCESS,
+            outcome_at_step=2,
+        )
+        session: RunSession = _build_session(config, robot, FakeSafetyGate(True), recorder, producer=producer)
+
+        session.connect()
+        session.prepare_episode()
+        execute_count_before: int = sum(event[0] == 'execute' for event in robot.events)
+        state: EpisodeState = session.run_prepared_episode(max_steps=10)
+        episode_events: list[tuple[str, tuple[float, ...] | None]] = robot.events[len(robot.events) - 3:]
+
+        self.assertEqual(state, EpisodeState.SUCCEEDED)
+        self.assertEqual(recorder.record_count, 2)
+        self.assertEqual(recorder.finish_count, 1)
+        self.assertEqual(recorder.abort_count, 0)
+        self.assertEqual(sum(event[0] == 'execute' for event in robot.events) - execute_count_before, 2)
+        self.assertEqual(episode_events[-1][0], 'hold')
+        self.assertEqual(session.control_loop_diagnostics()['completed_step_count'], 2)
+
+    def test_failure_button_discards_episode(
+        self,
+    ) -> None:
+        '''실패 입력 시 현재 step을 실행하지 않고 저장 없이 DISCARDED로 끝나는지 검증한다.'''
+        config: RunConfig = _build_config(execution_target='mujoco')
+        robot: FakeRobot = FakeRobot()
+        recorder: FakeRecorder = FakeRecorder()
+        producer: OutcomeActionProducer = OutcomeActionProducer(
+            action=FIXED_ACTION,
+            outcome=EpisodeOutcome.FAILURE,
+            outcome_at_step=3,
+        )
+        session: RunSession = _build_session(config, robot, FakeSafetyGate(True), recorder, producer=producer)
+
+        session.connect()
+        session.prepare_episode()
+        state: EpisodeState = session.run_prepared_episode(max_steps=10)
+
+        self.assertEqual(state, EpisodeState.DISCARDED)
+        self.assertEqual(recorder.record_count, 3)
+        self.assertEqual(recorder.abort_count, 1)
+        self.assertEqual(recorder.finish_count, 0)
+        self.assertEqual(robot.events[-1][0], 'hold')
+
+        session.prepare_episode()
+        next_state: EpisodeState = session.run_prepared_episode(max_steps=2)
+
+        self.assertEqual(next_state, EpisodeState.FINISHED)
+        self.assertEqual(recorder.start_count, 2)
+
+    def test_sleep_subtracts_processing_time_to_keep_control_hz(
+        self,
+    ) -> None:
+        '''처리 시간을 뺀 나머지만 sleep하고 한 주기 이상 밀리면 기준 시각을 재설정하는지 검증한다.'''
+        config: RunConfig = _build_config(execution_target='mujoco')
+        period_s: float = 1.0 / config.common.control_hz
+        # Step마다 (step 시작, 처리 종료, sleep 종료) 순서로 clock을 읽음
+        clock: FakeClock = FakeClock((
+            0.0, 0.005, period_s,
+            period_s, period_s + 0.010, 2.0 * period_s,
+            2.0 * period_s, 2.0 * period_s + 0.100, 2.0 * period_s + 0.100,
+            2.0 * period_s + 0.100, 2.0 * period_s + 0.110, 3.0 * period_s + 0.100,
+        ))
+        sleeps: list[float] = []
+        session: RunSession = RunSession(
+            config=config,
+            robot=FakeRobot(),
+            action_producer=FakeActionProducer(action=FIXED_ACTION),
+            safety_gate=FakeSafetyGate(True),
+            recorder=FakeRecorder(),
+            sleeper=sleeps.append,
+            clock=clock,
+        )
+
+        session.connect()
+        session.prepare_episode()
+        session.run_prepared_episode(max_steps=4)
+
+        # 세 번째 step은 100 ms 처리로 deadline을 넘겨 sleep하지 않고, 네 번째 step은 새 기준으로 sleep
+        self.assertEqual(len(sleeps), 3)
+        self.assertAlmostEqual(sleeps[0], period_s - 0.005)
+        self.assertAlmostEqual(sleeps[1], period_s - 0.010)
+        self.assertAlmostEqual(sleeps[2], period_s - 0.010)
+
+    def test_keyboard_interrupt_aborts_recording(
+        self,
+    ) -> None:
+        '''Notebook interrupt도 recorder를 abort하는지 검증한다.'''
+        config: RunConfig = _build_config(execution_target='mujoco')
+        robot: FakeRobot = FakeRobot()
+        recorder: FakeRecorder = FakeRecorder()
+
+        def interrupting_sleep(
+            duration_s: float,
+        ) -> None:
+            '''첫 sleep에서 KeyboardInterrupt를 발생시킨다.'''
+            del duration_s
+            raise KeyboardInterrupt
+
+        session: RunSession = RunSession(
+            config=config,
+            robot=robot,
+            action_producer=FakeActionProducer(action=FIXED_ACTION),
+            safety_gate=FakeSafetyGate(True),
+            recorder=recorder,
+            sleeper=interrupting_sleep,
+        )
+
+        session.connect()
+        session.prepare_episode()
+        with self.assertRaises(KeyboardInterrupt):
+            session.run_prepared_episode(max_steps=3)
+
+        self.assertEqual(session.state, EpisodeState.ABORTED)
+        self.assertEqual(recorder.abort_count, 1)
 
 
 if __name__ == '__main__':

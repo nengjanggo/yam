@@ -62,6 +62,28 @@ class RobotVisualizer(Protocol):
         ...
 
 
+class CameraSource(Protocol):
+    '''Robot observation에 넣을 role별 camera frame을 제공하는 interface를 정의한다.'''
+
+    def connect(
+        self,
+    ) -> None:
+        '''Camera resource를 연결한다.'''
+        ...
+
+    def read_frames(
+        self,
+    ) -> Mapping[str, object]:
+        '''Role별 최신 camera frame을 반환한다.'''
+        ...
+
+    def close(
+        self,
+    ) -> None:
+        '''Camera resource를 해제한다.'''
+        ...
+
+
 RobotVisualizerFactory = Callable[[I2RTRobot], RobotVisualizer]
 EnvironmentResetter = Callable[[tuple[float, ...]], None]
 VectorConverter = Callable[[tuple[float, ...]], object]
@@ -90,6 +112,7 @@ class I2RTRobotBackend:
         visualizer_factory: RobotVisualizerFactory | None = None,
         environment_resetter: EnvironmentResetter | None = None,
         image_provider: ImageProvider | None = None,
+        camera: CameraSource | None = None,
         clock: Clock = time.monotonic,
         move_duration_s: float = 3.0,
         move_hz: float = 50.0,
@@ -100,6 +123,8 @@ class I2RTRobotBackend:
             raise ValueError('move_duration_s must be positive')
         if move_hz <= 0.0:
             raise ValueError('move_hz must be positive')
+        if image_provider is not None and camera is not None:
+            raise ValueError('image_provider and camera cannot be used together')
         self._config: RobotConfig = config
         self._execution_target: ExecutionTarget = execution_target
         self._loader: I2RTRobotLoader = loader
@@ -107,6 +132,7 @@ class I2RTRobotBackend:
         self._visualizer_factory: RobotVisualizerFactory | None = visualizer_factory
         self._environment_resetter: EnvironmentResetter | None = environment_resetter
         self._image_provider: ImageProvider | None = image_provider
+        self._camera: CameraSource | None = camera
         self._clock: Clock = clock
         self._move_duration_s: float = move_duration_s
         self._move_hz: float = move_hz
@@ -117,16 +143,38 @@ class I2RTRobotBackend:
     def _require_robot(
         self,
     ) -> I2RTRobot:
-        '''연결된 I2RT Robot을 반환한다.'''
+        '''연결된 I2RT Robot을 반환하고 real robot의 background control thread가 멈췄으면 거부한다.'''
         if self._robot is None:
             raise RuntimeError('I2RTRobotBackend is not connected')
+        # I2RT는 motor error 시 thread만 종료하고 command와 observation은 조용히 stale 값으로 동작
+        motor_chain: object = getattr(self._robot, 'motor_chain', None)
+        if motor_chain is not None and not getattr(motor_chain, 'running', True):
+            raise RuntimeError(
+                'I2RT motor chain control loop has stopped; motors are no longer commanded. '
+                'Close the session and reconnect the robot.'
+            )
+        server_thread: object = getattr(self._robot, '_server_thread', None)
+        is_alive: object = getattr(server_thread, 'is_alive', None)
+        if callable(is_alive) and not is_alive():
+            raise RuntimeError(
+                'I2RT robot server thread has stopped; commands are no longer applied. '
+                'Close the session and reconnect the robot.'
+            )
         return self._robot
 
     def connect(
         self,
     ) -> None:
-        '''Configuration에 맞는 I2RT real 또는 sim Robot을 생성한다.'''
-        self._robot = self._loader(self._config, self._execution_target)
+        '''Camera를 먼저 연결한 뒤 configuration에 맞는 I2RT real 또는 sim Robot을 생성한다.'''
+        # Camera 연결 실패 시 motor를 enable하기 전에 중단
+        if self._camera is not None:
+            self._camera.connect()
+        try:
+            self._robot = self._loader(self._config, self._execution_target)
+        except BaseException:
+            if self._camera is not None:
+                self._camera.close()
+            raise
         if self._visualizer_factory is not None:
             self._visualizer = self._visualizer_factory(self._robot)
             initial_state: tuple[float, ...] = self.get_observation().state
@@ -142,7 +190,11 @@ class I2RTRobotBackend:
         gripper: tuple[float, ...] = _to_float_tuple(raw_observation['gripper_pos'])
         # Shape `(6,)` arm과 shape `(1,)` gripper를 shape `(7,)` state로 결합
         state: tuple[float, ...] = (*arm, *gripper)
-        images: Mapping[str, object] = {} if self._image_provider is None else self._image_provider()
+        images: Mapping[str, object] = {}
+        if self._image_provider is not None:
+            images = self._image_provider()
+        elif self._camera is not None:
+            images = self._camera.read_frames()
         return RobotObservation(
             state=state,
             images=images,
@@ -203,10 +255,12 @@ class I2RTRobotBackend:
     def close(
         self,
     ) -> None:
-        '''I2RT Robot resource를 해제하고 reference를 제거한다.'''
+        '''I2RT Robot과 camera resource를 해제하고 reference를 제거한다.'''
         if self._visualizer is not None:
             self._visualizer.close()
         if self._robot is not None:
             self._robot.close()
+        if self._camera is not None:
+            self._camera.close()
         self._visualizer = None
         self._robot = None

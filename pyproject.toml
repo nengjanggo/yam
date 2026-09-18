@@ -12,6 +12,7 @@ dependencies = [
     'av>=12',
     'fastapi>=0.115',
     'i2rt',
+    'opencv-python-headless>=4.8,<5',
     'pillow>=12,<13',
     'uvicorn[standard]>=0.30',
 ]

@@ -12,7 +12,7 @@ from typing import cast
 from .config import ExecutionTarget, InferenceRunConfig, QuestConfig, RobotConfig, RunConfig, TeleopRunConfig
 from .data import NullRecorder
 from .interfaces import ActionProducer, EpisodeRecorder, RobotBackend, SafetyGate
-from .robot.i2rt_adapter import I2RTRobot, I2RTRobotBackend, RobotVisualizer
+from .robot.i2rt_adapter import CameraSource, I2RTRobot, I2RTRobotBackend, RobotVisualizer
 from .safety import PassThroughSafetyGate
 from .session import RunSession
 from .types import RobotAction, RobotObservation, SafetyDecision
@@ -61,12 +61,19 @@ def _create_default_robot(
             _create_mujoco_visualizer,
             quest_config=config.common.quest,
         )
+    camera: CameraSource | None = None
+    # 실제 camera image는 실제 robot observation에만 결합
+    if config.common.execution_target == 'real' and config.common.camera.devices:
+        from .camera import CameraRig
+
+        camera = CameraRig(config.common.camera)
     return I2RTRobotBackend(
         config=config.common.robot,
         execution_target=config.common.execution_target,
         loader=_load_i2rt_robot,
         vector_converter=_numpy_vector,
         visualizer_factory=visualizer_factory,
+        camera=camera,
     )
 
 
@@ -110,6 +117,15 @@ def _create_default_quest3_action_producer(
         ),
         max_frame_age_s=config.common.quest.max_frame_age_s,
     )
+
+
+def _create_default_recorder(
+    config: RunConfig,
+) -> EpisodeRecorder:
+    '''RunConfig의 단일 arm과 camera로 yam-abc raw episode recorder를 생성한다.'''
+    from .data.yam_abc import create_yam_abc_recorder
+
+    return create_yam_abc_recorder(config)
 
 
 class _UnavailableActionProducer:
@@ -176,7 +192,7 @@ class _UnavailableSafetyGate:
 
 
 class _UnavailableRecorder:
-    '''Camera-aware yam-abc recorder가 주입되기 전 recording을 차단한다.'''
+    '''Recorder factory가 주입되지 않았을 때 recording을 차단한다.'''
 
     def __init__(
         self,
@@ -222,7 +238,7 @@ class RuntimeDependencies:
     pi_factory: ActionProducerFactory | None = None
     rtc_factory: ActionProducerFactory | None = None
     safety_gate_factory: SafetyGateFactory | None = None
-    recorder_factory: RecorderFactory | None = None
+    recorder_factory: RecorderFactory | None = _create_default_recorder
 
 
 def _select_action_producer(
@@ -284,7 +300,7 @@ def _select_recorder(
         return NullRecorder()
     if dependencies.recorder_factory is None:
         return _UnavailableRecorder(
-            'Camera 기종 확정 후 yam-abc recorder factory를 RuntimeDependencies에 주입해야 합니다.'
+            'yam-abc recorder factory를 RuntimeDependencies에 주입해야 합니다.'
         )
     return dependencies.recorder_factory(config)
 

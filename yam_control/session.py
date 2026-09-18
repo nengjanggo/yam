@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 
 from .config import RunConfig
 from .interfaces import ActionProducer, EpisodeRecorder, RobotBackend, SafetyGate
-from .types import EpisodeState, RobotAction, RobotObservation, SafetyDecision
+from .types import EpisodeOutcome, EpisodeState, RobotAction, RobotObservation, SafetyDecision
 
 Sleeper = Callable[[float], None]
 Clock = Callable[[], float]
@@ -38,6 +38,7 @@ class RunSession:
         self._connected: bool = False
         self._stop_requested: bool = False
         self._completed_step_count: int = 0
+        self._recorded_step_count: int = 0
         self._total_processing_s: float = 0.0
         self._max_processing_s: float = 0.0
         self._total_tick_period_s: float = 0.0
@@ -85,6 +86,24 @@ class RunSession:
             raise TypeError('ActionProducer diagnostics must be a mapping')
         return dict(diagnostics)
 
+    def _action_producer_is_holding(
+        self,
+    ) -> bool:
+        '''ActionProducer가 optional hold 사유를 제공하고 현재 step에서 hold 중이면 True를 반환한다.'''
+        hold_reason: object = getattr(self._action_producer, 'last_hold_reason', None)
+        return hold_reason is not None
+
+    def _action_producer_episode_outcome(
+        self,
+    ) -> EpisodeOutcome | None:
+        '''ActionProducer가 optional로 제공하는 작업자의 episode 조기 종료 입력을 반환한다.'''
+        episode_outcome: object = getattr(self._action_producer, 'episode_outcome', None)
+        if episode_outcome is None:
+            return None
+        if not isinstance(episode_outcome, EpisodeOutcome):
+            raise TypeError('ActionProducer episode_outcome must be an EpisodeOutcome')
+        return episode_outcome
+
     def control_loop_diagnostics(
         self,
     ) -> dict[str, int | float | None]:
@@ -93,6 +112,7 @@ class RunSession:
         if completed_step_count == 0:
             return {
                 'completed_step_count': 0,
+                'recorded_step_count': 0,
                 'mean_processing_ms': None,
                 'max_processing_ms': None,
                 'mean_tick_period_ms': None,
@@ -101,6 +121,7 @@ class RunSession:
             }
         return {
             'completed_step_count': completed_step_count,
+            'recorded_step_count': self._recorded_step_count,
             'mean_processing_ms': self._total_processing_s * 1000.0 / completed_step_count,
             'max_processing_ms': self._max_processing_s * 1000.0,
             'mean_tick_period_ms': self._total_tick_period_s * 1000.0 / completed_step_count,
@@ -120,6 +141,7 @@ class RunSession:
             raise ValueError('max_steps must be positive')
         # 새 episode의 완료된 control step만 집계한다.
         self._completed_step_count = 0
+        self._recorded_step_count = 0
         self._total_processing_s = 0.0
         self._max_processing_s = 0.0
         self._total_tick_period_s = 0.0
@@ -134,32 +156,65 @@ class RunSession:
         self.state = EpisodeState.RUNNING
         control_period_s: float = 1.0 / self.config.common.control_hz
         step_index: int
-        for step_index in range(max_steps):
-            del step_index
-            if self._stop_requested:
-                break
-            step_start_s: float = self._clock()
-            observation = self._robot.get_observation()
-            candidate_action: RobotAction = self._action_producer.next_action(observation)
-            decision: SafetyDecision = self._safety_gate.evaluate(observation, candidate_action)
-            if not decision.accepted:
-                self._robot.hold()
-                self._recorder.abort()
-                self.state = EpisodeState.ABORTED
-                return self.state
-            self._robot.execute(decision.action)
-            self._recorder.record(observation, decision.action)
-            processing_s: float = self._clock() - step_start_s
-            self._sleeper(control_period_s)
-            tick_period_s: float = self._clock() - step_start_s
-            self._completed_step_count += 1
-            self._total_processing_s += processing_s
-            self._max_processing_s = max(self._max_processing_s, processing_s)
-            self._total_tick_period_s += tick_period_s
-            self._max_tick_period_s = max(self._max_tick_period_s, tick_period_s)
+        next_tick_s: float | None = None
+        succeeded: bool = False
+        try:
+            for step_index in range(max_steps):
+                del step_index
+                if self._stop_requested:
+                    break
+                step_start_s: float = self._clock()
+                if next_tick_s is None:
+                    next_tick_s = step_start_s + control_period_s
+                observation = self._robot.get_observation()
+                candidate_action: RobotAction = self._action_producer.next_action(observation)
+                episode_outcome: EpisodeOutcome | None = self._action_producer_episode_outcome()
+                if episode_outcome is EpisodeOutcome.FAILURE:
+                    # 작업자가 실패로 표시한 episode는 현재 step을 실행하지 않고 저장 없이 종료
+                    self._robot.hold()
+                    self._recorder.abort()
+                    self.state = EpisodeState.DISCARDED
+                    return self.state
+                if episode_outcome is EpisodeOutcome.SUCCESS:
+                    # 작업자가 성공으로 표시한 episode는 현재 step을 실행하지 않고 저장하며 종료
+                    succeeded = True
+                    break
+                decision: SafetyDecision = self._safety_gate.evaluate(observation, candidate_action)
+                if not decision.accepted:
+                    self._robot.hold()
+                    self._recorder.abort()
+                    self.state = EpisodeState.ABORTED
+                    return self.state
+                self._robot.execute(decision.action)
+                # Clutch release 등으로 action source가 hold 중인 step은 저장하지 않음
+                if not self._action_producer_is_holding():
+                    self._recorder.record(observation, decision.action)
+                    self._recorded_step_count += 1
+                processing_end_s: float = self._clock()
+                processing_s: float = processing_end_s - step_start_s
+                # 처리 시간을 뺀 다음 tick 시각까지만 sleep해 control_hz와 video fps를 일치시킴
+                sleep_s: float = next_tick_s - processing_end_s
+                if sleep_s > 0.0:
+                    self._sleeper(sleep_s)
+                tick_end_s: float = self._clock()
+                tick_period_s: float = tick_end_s - step_start_s
+                next_tick_s += control_period_s
+                # 한 주기 이상 밀리면 밀린 tick을 몰아서 실행하지 않도록 기준 시각을 재설정
+                if tick_end_s > next_tick_s:
+                    next_tick_s = tick_end_s + control_period_s
+                self._completed_step_count += 1
+                self._total_processing_s += processing_s
+                self._max_processing_s = max(self._max_processing_s, processing_s)
+                self._total_tick_period_s += tick_period_s
+                self._max_tick_period_s = max(self._max_tick_period_s, tick_period_s)
+        except BaseException:
+            # 예외나 KeyboardInterrupt로 중단된 episode는 완료 flag 없이 폐기하고 다음 start를 허용
+            self._recorder.abort()
+            self.state = EpisodeState.ABORTED
+            raise
         self._robot.hold()
         self._recorder.finish()
-        self.state = EpisodeState.FINISHED
+        self.state = EpisodeState.SUCCEEDED if succeeded else EpisodeState.FINISHED
         return self.state
 
     def run_simulation_episodes(
