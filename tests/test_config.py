@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from typing import cast
 
 from yam_control import create_session
@@ -134,6 +135,45 @@ class ConfigTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             QuestConfig(stream_jpeg_quality=invalid_quality)
+
+    def test_real_wrist_preview_requires_wrist_camera(
+        self,
+    ) -> None:
+        '''Real wrist preview를 켰는데 wrist role camera가 없으면 session 생성을 거부하는지 검증한다.'''
+        config: RunConfig = _build_config(
+            mode='teleop',
+            use_rtc=False,
+            execution_target='real',
+        )
+        config = replace(
+            config,
+            common=replace(
+                config.common,
+                quest=QuestConfig(show_real_wrist_camera=True),
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, 'requires a wrist camera'):
+            create_session(config)
+
+    def test_inference_ignores_real_wrist_preview(
+        self,
+    ) -> None:
+        '''Inference에서는 Quest wrist preview 설정과 wrist camera 유무를 무시하는지 검증한다.'''
+        config: RunConfig = _build_config(
+            mode='inference',
+            use_rtc=False,
+            execution_target='real',
+        )
+        config = replace(
+            config,
+            common=replace(
+                config.common,
+                quest=QuestConfig(show_real_wrist_camera=True),
+            ),
+        )
+
+        create_session(config)
 
     def test_groot_selection_is_explicitly_not_implemented(
         self,

@@ -13,7 +13,7 @@
 
 현재 clone 상태는 `yam-abc-reproduce` commit `7d9f9d135a2b949de54a349856b65863f81319e1`과 그 repository가 pin한 I2RT submodule commit `5d47b358bafb30c65e397f2ece506550a0db4594`이다. Quest UI와 clutch mapping은 local module로 제공한다.
 
-WebSocket relay, WebRTC signaling, H.264 우선순위와 MuJoCo JPEG camera track은 `yam_control.teleop.mujoco_relay`가 직접 제공한다. WebRTC track은 `CAM_FPS`와 동일한 FPS로 전송해 불필요한 duplicate frame을 줄인다. Local Quest Web UI는 MuJoCo video를 자동 연결하고 WebXR controller frame을 최대 30 Hz로 전송한다. World-locked video panel은 eye-level보다 `0.75 m` 낮게 배치한다. MuJoCo RGB/WebRTC video에는 alpha channel이 없으므로 WebGL shader가 검은 배경을 chroma key로 제거해 Quest passthrough를 표시한다. TLS certificate는 ignore된 `certs/`에 보관한다.
+WebSocket relay, WebRTC signaling, H.264 우선순위와 target별 JPEG camera track은 `yam_control.teleop.mujoco_relay`가 직접 제공한다. Relay는 video source를 광고하지 않은 상태로 시작하며 session이 전송하는 `config_update`에 따라 MuJoCo 또는 wrist camera 하나만 활성화한다. WebRTC track은 `CAM_FPS`와 동일한 FPS로 전송해 불필요한 duplicate frame을 줄인다. Local Quest Web UI는 video source를 자동 연결하고 WebXR controller frame을 최대 30 Hz로 전송한다. MuJoCo video는 낮게 배치한 큰 world-locked panel에서 검은 배경을 chroma key로 제거하고, wrist camera video는 passthrough를 가리지 않도록 오른쪽 아래의 작은 head-locked panel에 불투명하게 표시한다. TLS certificate는 ignore된 `certs/`에 보관한다.
 
 WebXR controller 처리는 Meta 공식 [`webxr-first-steps`](https://github.com/meta-quest/webxr-first-steps)에서 사용하는 WebXR input source 방식과 WebXR 표준 `gripSpace`, `XRFrame.getPose()`, `Gamepad` API를 따른다. Meta repository 전체는 clone하지 않으며 tutorial build system, Three.js와 asset을 dependency로 추가하지 않는다.
 
@@ -41,7 +41,7 @@ yam/
 │   │   ├── __init__.py — camera driver와 camera rig public API를 노출한다.
 │   │   ├── processing.py — RGB frame을 center crop 또는 zero pad 후 정사각형 output으로 resize한다.
 │   │   ├── v4l2.py — OpenCV V4L2 backend로 UVC RGB stream을 읽는 yam-abc CameraDriver를 제공한다.
-│   │   └── rig.py — camera별 yam-abc CameraWorker를 실행하고 role별 신선한 최신 frame을 제공한다.
+│   │   └── rig.py — camera별 yam-abc CameraWorker를 실행하고 role별 최신 frame과 optional wrist JPEG stream을 제공한다.
 │   ├── robot/
 │   │   ├── __init__.py — robot backend public API를 노출한다.
 │   │   ├── i2rt_adapter.py — I2RT 실제 YAM과 MuJoCo YAM을 지연 연결하는 adapter를 제공한다.
@@ -51,7 +51,7 @@ yam/
 │   │   ├── __init__.py — teleoperation source public API를 노출한다.
 │   │   ├── clutch_pose_mapper.py — engage 기준 controller delta를 결정적인 end-effector target으로 변환한다.
 │   │   ├── leader.py — 지원하지 않는 Leader Arm 선택을 명시적으로 거부한다.
-│   │   ├── mujoco_relay.py — WebSocket relay, WebRTC signaling과 MuJoCo JPEG camera track을 제공한다.
+│   │   ├── mujoco_relay.py — WebSocket relay, WebRTC signaling과 target별 JPEG camera track을 제공한다.
 │   │   ├── quest3.py — WebXR background reader와 clutch/stale-frame ActionProducer를 제공한다.
 │   │   ├── quest3_probe.py — robot 연결 없이 Quest 3 xr_frame 입력을 검증한다.
 │   │   ├── yam_retargeter.py — local clutch mapping과 I2RT YAM FK/IK를 결합한다.
@@ -69,11 +69,11 @@ yam/
 │       ├── recorder.py — NullRecorder와 yam-abc-reproduce recorder adapter를 제공한다.
 │       └── yam_abc.py — 단일 arm StepEncoder, EE pose를 추가 저장하는 yam-abc EpisodeRecorder와 그 생성을 제공한다.
 ├── tests/
-│   ├── test_camera.py — crop/pad 정사각형 변환, camera configuration과 CameraRig lifecycle을 검증한다.
+│   ├── test_camera.py — crop/pad 변환, CameraRig lifecycle과 wrist JPEG stream을 검증한다.
 │   ├── test_clutch_pose_mapper.py — translation, rotation, reach limit와 re-engage mapping을 검증한다.
 │   ├── test_config.py — mode별 configuration 정규화와 validation을 검증한다.
 │   ├── test_i2rt_adapter.py — visualizer·camera lifecycle과 Quest stream의 passive viewer 생략을 검증한다.
-│   ├── test_mujoco_relay.py — MuJoCo frame cache, WebRTC track과 relay protocol을 검증한다.
+│   ├── test_mujoco_relay.py — JPEG frame cache, WebRTC track과 target별 camera 광고를 검증한다.
 │   ├── test_quest3.py — xr_frame parsing, background reader, input probe와 clutch safety를 검증한다.
 │   ├── test_session.py — fake component로 episode state, initial pose, hold step 제외와 예외 시 recording 폐기를 검증한다.
 │   ├── test_yam_abc_recorder.py — 단일 arm, 단일 camera episode의 yam-abc default format 저장을 검증한다.
@@ -116,6 +116,7 @@ CommonConfig
 │   ├── translation_scale, rotation_scale
 │   ├── position_reach_limit_m, rotation_reach_limit_rad
 │   ├── max_joint_delta_rad, ik_orientation_cost, max_frame_age_s
+│   ├── show_real_wrist_camera
 │   ├── stream_frame_path, stream_width, stream_height
 │   ├── stream_fps, stream_jpeg_quality
 │   └── r_calib
@@ -192,7 +193,7 @@ Observation 읽기, `(S,)` action 실행, episode initial pose 이동, environme
 
 MuJoCo target은 I2RT `SimRobot`을 action backend로 사용한다. `display_mode='robot_camera'`이면 `MujocoRobotViewer`가 동일 XML을 EGL offscreen renderer로 그려 atomic JPEG file을 갱신하며 desktop passive viewer는 열지 않는다. Offscreen camera는 `episode_initial_pose`가 반영된 현재 robot geometry 중심을 바라보고 `2.0 × model.stat.extent` 거리, `0°` azimuth와 `-30°` elevation에서 전체 robot을 표시한다. `joint1=0`에서 robot이 향하는 MuJoCo `+x` 방향과 작업자 정면이 일치하도록 robot 뒤쪽의 약간 높은 위치에서 바라보는 구도이다. 그 외 mode에서는 passive viewer에 measured state를 동기화한다. EGL과 desktop GL context를 동시에 만들지 않으므로 Notebook process의 context 충돌을 방지한다. Viewer와 JPEG는 visualization만 담당하며 control state의 source가 아니다.
 
-`execution_target='real'`이고 camera가 설정되어 있으면 factory가 `CameraRig`를 `I2RTRobotBackend`에 주입한다. Backend는 camera를 robot보다 먼저 연결해 camera 실패 시 motor를 enable하기 전에 중단하고, robot 생성이 실패하면 camera를 해제한다. `get_observation()`은 `RobotObservation.images[role]`에 yam-abc `CameraFrame`을 넣는다. MuJoCo에는 실제 camera를 결합하지 않는다.
+`execution_target='real'`이고 camera가 설정되어 있으면 factory가 `CameraRig`를 `I2RTRobotBackend`에 주입한다. Backend는 camera를 robot보다 먼저 연결해 camera 실패 시 motor를 enable하기 전에 중단하고, robot 생성이 실패하면 camera를 해제한다. `get_observation()`은 `RobotObservation.images[role]`에 yam-abc `CameraFrame`을 넣는다. `show_real_wrist_camera=True`이면 동일한 wrist frame을 Quest stream에도 사용하며 camera device를 두 번 열지 않는다. MuJoCo에는 실제 camera를 결합하지 않는다.
 
 I2RT는 motor error(예: `loss communication`)가 발생하면 background motor chain loop와 robot server thread만 종료하고, 이후 `command_joint_pos()`는 목표를 저장만 하며 `get_observations()`는 마지막 cache 값을 반환한다. 이 상태를 조용히 지나치지 않도록 `I2RTRobotBackend`는 observation과 command마다 `motor_chain.running`과 server thread 생존 여부를 확인하고, 멈췄으면 `RuntimeError`를 발생시킨다. `close()`는 이 확인 없이 항상 수행한다. 복구하려면 session을 닫고 다시 연결하며, I2RT가 연결 시 motor error를 지우고 다시 enable한다.
 
@@ -206,9 +207,9 @@ I2RT는 motor error(예: `loss communication`)가 발생하면 background motor 
 
 ### Quest 3 운용
 
-작업자는 Quest 3 headset을 착용하고 `immersive-ar` passthrough로 workspace와 controller tracking을 유지한다. MuJoCo teleoperation에서는 world-locked `MuJoCo` video panel로 simulator 화면을 함께 확인한다. `MujocoFrameReader`가 atomic JPEG file을 읽고 `MujocoCameraTrack`이 `top` camera H.264 WebRTC stream으로 Quest에 전송한다.
+작업자는 Quest 3 headset을 착용하고 `immersive-ar` passthrough로 workspace와 controller tracking을 유지한다. `execution_target='mujoco'`이고 `display_mode='robot_camera'`이면 큰 world-locked `MuJoCo` panel로 simulator 화면을 표시한다. `execution_target='real'`이면 MuJoCo 화면을 광고하지 않으며 `show_real_wrist_camera=True`일 때만 작은 head-locked `Wrist Camera` panel을 오른쪽 아래에 표시한다. `show_real_wrist_camera=False`이면 실제 robot teleoperation video를 표시하지 않는다. Relay는 session의 `config_update`를 받은 뒤 해당 camera 하나만 Quest에 광고한다.
 
-기본 stream은 `640×480`, `15 FPS`, JPEG quality `70`이다. WebRTC 연결은 PC와 Quest 사이의 LAN peer-to-peer 경로이므로 외부 인터넷 traffic을 발생시키지 않지만, local Wi-Fi bandwidth와 PC의 MuJoCo render/JPEG/H.264 encode 부하는 추가된다. 화질보다 latency가 중요한 검증 단계에서는 이 기본값을 유지하고, 끊김이 있으면 먼저 resolution 또는 FPS를 낮춘다. Local Web UI는 `immersive-ar`만 허용하며, video rendering이 실패해도 controller frame 전송을 먼저 수행한다.
+기본 stream은 `640×480`, `15 FPS`, JPEG quality `70`이다. MuJoCo renderer와 `CameraRig`는 같은 atomic JPEG path를 target별로 사용하고 relay가 이를 H.264 WebRTC stream으로 변환한다. Wrist camera capture와 recording rate는 camera configuration을 따르며 Quest용 JPEG 갱신만 `stream_fps`로 제한한다. WebRTC 연결은 PC와 Quest 사이의 LAN peer-to-peer 경로이므로 외부 internet traffic을 발생시키지 않지만 local Wi-Fi bandwidth와 PC의 JPEG/H.264 encode 부하는 추가된다. 화질보다 latency가 중요한 검증 단계에서는 이 기본값을 유지하고, 끊김이 있으면 먼저 resolution 또는 FPS를 낮춘다. Local Web UI는 `immersive-ar`만 허용하며 video rendering이 실패해도 controller frame 전송을 먼저 수행한다.
 
 `quest_input.js`는 `XRSession.inputSources`의 left/right controller `gripSpace`를 `XRFrame.getPose()`로 `local-floor` reference space에서 읽고 `Gamepad.buttons`와 `Gamepad.axes`를 기존 `xr_frame` JSON protocol로 직렬화한다. Controller `gripSpace`가 없거나 pose tracking이 유효하지 않은 frame은 전송 대상에서 제외한다. WebXR `local-floor` controller pose는 HMD frame이 아니라 고정된 reference space 기준이다. 따라서 controller pose를 HMD-relative pose로 재변환하지 않고, clutch engage 시점의 HMD yaw만 `r_calib` alignment에 적용한다. 이후에는 local `ClutchPoseMapper`가 engage 시점 기준의 절대 controller delta를 계산하므로 headset을 착용한 작업자의 head motion은 robot action에 섞이지 않는다. Stale WebXR frame을 감지하면 clutch를 한 번 release하기 전까지 stop 상태를 유지한다.
 
@@ -250,7 +251,7 @@ Physical Intelligence의 `real-time-chunking-kinetix`는 Kinetix simulation expe
 
 각 frame은 RGB로 변환한 뒤 `fit_mode`에 따라 정사각형으로 만든다. `center_crop`은 긴 축 양 끝을 잘라 가운데만 남기고(16:9에서는 좌우), `zero_pad`는 짧은 축 양 끝에 0을 채운다(16:9에서는 위아래). 마지막에는 항상 `output_size×output_size`(기본 `224×224`)로 area interpolation resize한다. 원본 해상도 frame은 저장하지 않는다.
 
-`CameraRig`는 camera마다 yam-abc `CameraWorker` background thread를 실행해 control loop가 camera read로 막히지 않게 한다. `connect()`는 첫 frame 도착 후 자동 노출이 안정될 때까지 `settle_time_s`(기본 `1.0 s`) 기다린다. L515는 연결 직후 약 `0.7 s` 동안 어두운 frame을 낸다. `read_frames()`는 `max_frame_age_s`보다 오래된 frame이 있으면 예외를 발생시켜 camera가 멈춘 상태로 같은 frame이 반복 저장되지 않게 한다. Role은 `top`과 `wrist`를 지원하며 wrist camera는 `CameraConfig.devices`에 추가하기만 하면 observation과 recording에 함께 포함된다.
+`CameraRig`는 camera마다 yam-abc `CameraWorker` background thread를 실행해 control loop가 camera read로 막히지 않게 한다. `connect()`는 첫 frame 도착 후 자동 노출이 안정될 때까지 `settle_time_s`(기본 `1.0 s`) 기다린다. L515는 연결 직후 약 `0.7 s` 동안 어두운 frame을 낸다. `read_frames()`는 `max_frame_age_s`보다 오래된 frame이 있으면 예외를 발생시켜 camera가 멈춘 상태로 같은 frame이 반복 저장되지 않게 한다. Role은 `top`과 `wrist`를 지원하며 wrist camera는 `CameraConfig.devices`에 추가하기만 하면 observation과 recording에 함께 포함된다. 실제 robot에서 `show_real_wrist_camera=True`이면 기존 wrist RGB frame을 stream 크기에 letterbox하고 `stream_fps`로 제한해 atomic JPEG file에 추가 기록한다. Top camera는 Quest에 전송하지 않는다.
 
 구현 위치: [`CameraDeviceConfig`](./yam_control/config.py#L123), [`CameraConfig`](./yam_control/config.py#L161), [`fit_square_image`](./yam_control/camera/processing.py#L12), [`V4L2RGBCamera`](./yam_control/camera/v4l2.py#L20), [`CameraRig`](./yam_control/camera/rig.py#L19), [`camera test`](./tests/test_camera.py#L107)
 
@@ -286,7 +287,7 @@ Control loop는 episode 첫 step 시각을 기준으로 `1 / control_hz` 간격�
 
 `yam.ipynb`의 최상단 Markdown cell은 프로젝트 루트에서 실행하는 상대경로 기반 LAN HTTPS Quest relay command와 Quest Browser 접속 주소를 안내한다. 이후 각 code cell 앞에 `1. 실행 설정`, `2. 카메라 연결`, `3. Session 생성`, `4. 메타퀘스트, MuJoCo 연결`, `5. Episode 초기화`, `6. Teleoperation 실행`, `7. Session 종료` Markdown 이름을 표시한다. 별도 작업자 안내 출력은 생성하지 않으며, `6. Teleoperation 실행`은 episode 결과, `retargeter`를 포함한 action source 진단값과 `control_loop` 시간 통계를 표시한다. MuJoCo 여러 episode 연속 실행 시 진단값은 마지막 episode 기준이다.
 
-`1. 실행 설정` cell은 `MUJOCO_GL='egl'`을 MuJoCo import 전에 설정하고 `QUEST_DISPLAY_MODE='robot_camera'`와 stream parameter를 정의한다. `2. 카메라 연결` cell은 모든 camera 설정값을 정의해 `config`에 반영하고, camera를 열어 변환된 frame 하나를 표시한 뒤 닫는다. 실제 robot 실행 시에는 `session.connect()`가 camera를 다시 연다. `4. 메타퀘스트, MuJoCo 연결` cell에서 Quest용 offscreen stream을 시작하고 첫 유효 Quest input frame을 확인한다. `5. Episode 초기화` cell에서 initial pose와 environment를 reset한 뒤 `6. Teleoperation 실행` cell로 진행한다. `robot_camera` mode에서는 desktop passive viewer를 열지 않는다.
+`1. 실행 설정` cell은 `MUJOCO_GL='egl'`을 MuJoCo import 전에 설정하고 `QUEST_DISPLAY_MODE='robot_camera'`, `SHOW_REAL_WRIST_CAMERA_IN_QUEST`와 stream parameter를 정의한다. `SHOW_REAL_WRIST_CAMERA_IN_QUEST`는 실제 robot의 wrist camera panel만 켜고 끄며 MuJoCo 표시에는 영향을 주지 않는다. `2. 카메라 연결` cell은 모든 camera 설정값을 정의해 `config`에 반영하고, camera를 열어 변환된 frame 하나를 표시한 뒤 닫는다. 실제 robot 실행 시에는 `session.connect()`가 camera를 다시 연다. `4. 메타퀘스트, MuJoCo 연결` cell에서 target별 Quest stream을 선택하고 첫 유효 Quest input frame을 확인한다. `5. Episode 초기화` cell에서 initial pose와 environment를 reset한 뒤 `6. Teleoperation 실행` cell로 진행한다. MuJoCo `robot_camera` mode에서는 desktop passive viewer를 열지 않는다.
 
 Notebook kernel과 Quest relay는 repository root의 Python 3.12 `.venv`를 사용한다. Root environment는 vendored I2RT를 editable local dependency로 사용한다. `certs/key.pem`과 `certs/cert.pem`은 gitignore 대상이며, 새 PC에서는 HTTPS 접속 주소를 SAN에 포함해 다시 생성해야 한다.
 
@@ -294,11 +295,11 @@ Notebook kernel과 Quest relay는 repository root의 Python 3.12 `.venv`를 사�
 
 ## 현재 구현 경계
 
-- 자동 검증 완료: mode별 configuration, teleoperation에서 `USE_RTC` 무시, factory 조합, Leader source 거부, local WebXR controller/viewer frame 생성, local WebSocket relay와 MuJoCo WebRTC camera track, Quest `xr_frame` parser/input probe/background reader, Quest clutch/stale-frame safety, local absolute clutch mapping과 I2RT FK/IK를 사용한 YAM retargeting, I2RT MuJoCo YAM command, passive viewer state 동기화, EGL offscreen JPEG 생성, episode initial pose lifecycle, SafetyGate 거부 흐름, recorder adapter 경계, 이름이 지정된 notebook cell, crop/pad camera 변환, CameraRig lifecycle과 stale frame 거부, 단일 arm·단일 camera yam-abc episode 저장, hold step recording 제외, 예외 시 recording 폐기, MuJoCo recording 비활성화, deadline 기반 control 주기, 멈춘 I2RT motor thread 거부, libx264 encoder 고정, grasp_site EE pose 저장, Quest A/B button 성공·실패 episode 조기 종료, joint limit·팔꿈치 특이점 제약과 위치 우선 IK, 미수렴 IK의 부분 추종.
+- 자동 검증 완료: mode별 configuration, teleoperation에서 `USE_RTC` 무시, factory 조합, Leader source 거부, local WebXR controller/viewer frame 생성, target별 Quest camera 광고와 panel layout, CameraRig wrist JPEG stream, Quest `xr_frame` parser/input probe/background reader, Quest clutch/stale-frame safety, local absolute clutch mapping과 I2RT FK/IK를 사용한 YAM retargeting, I2RT MuJoCo YAM command, passive viewer state 동기화, EGL offscreen JPEG 생성, episode initial pose lifecycle, SafetyGate 거부 흐름, recorder adapter 경계, 이름이 지정된 notebook cell, crop/pad camera 변환, CameraRig lifecycle과 stale frame 거부, 단일 arm·단일 camera yam-abc episode 저장, hold step recording 제외, 예외 시 recording 폐기, MuJoCo recording 비활성화, deadline 기반 control 주기, 멈춘 I2RT motor thread 거부, libx264 encoder 고정, grasp_site EE pose 저장, Quest A/B button 성공·실패 episode 조기 종료, joint limit·팔꿈치 특이점 제약과 위치 우선 IK, 미수렴 IK의 부분 추종.
 - 수동 검증 완료: robot 없이 실제 L515 RGB stream을 `CameraRig`로 열어 `960×540@30` capture, crop/pad `224×224` 변환, 자동 노출 안정화와 3초 yam-abc episode 저장·decode를 확인했다.
 - Concrete adapter 필요: table scene를 포함한 MuJoCo `ConfigurationValidator`, π0/π0.5 checkpoint loader, YAM-compatible upstream RTC producer.
-- 명시적으로 보류: Leader Arm teleoperation, GR00T inference, zero pose utility, Isaac Sim, 실제 robot camera view.
-- Test 범위: 실제 robot, Quest 3, camera, VLA를 연결하지 않고 fake component와 headless MuJoCo YAM model로 자동 검증한다. 새 Quest Web UI의 hardware input과 video panel은 작업자가 MuJoCo teleoperation으로 확인했다. 실제 robot command는 test에서 실행하지 않는다.
+- 명시적으로 보류: Leader Arm teleoperation, GR00T inference, zero pose utility, Isaac Sim.
+- Test 범위: 실제 robot, Quest 3, camera, VLA를 연결하지 않고 fake component와 headless MuJoCo YAM model로 자동 검증한다. Quest Web UI의 hardware input과 MuJoCo video panel은 작업자가 확인했지만 실제 wrist camera panel은 아직 hardware에서 확인하지 않았다. 실제 robot command는 test에서 실행하지 않는다.
 
 ## 주의점
 

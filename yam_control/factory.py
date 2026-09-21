@@ -62,11 +62,32 @@ def _create_default_robot(
             quest_config=config.common.quest,
         )
     camera: CameraSource | None = None
+    quest_config: QuestConfig = config.common.quest
+    mode_config: TeleopRunConfig | InferenceRunConfig = config.mode_config
+    show_real_wrist_camera: bool = (
+        isinstance(mode_config, TeleopRunConfig)
+        and mode_config.teleop_source == 'quest3'
+        and config.common.execution_target == 'real'
+        and quest_config.show_real_wrist_camera
+    )
+    if (
+        show_real_wrist_camera
+        and 'wrist' not in config.common.camera.roles
+    ):
+        raise ValueError('show_real_wrist_camera requires a wrist camera')
     # 실제 camera image는 실제 robot observation에만 결합
     if config.common.execution_target == 'real' and config.common.camera.devices:
         from .camera import CameraRig
 
-        camera = CameraRig(config.common.camera)
+        camera = CameraRig(
+            config.common.camera,
+            stream_role='wrist' if show_real_wrist_camera else None,
+            stream_frame_path=quest_config.stream_frame_path,
+            stream_width=quest_config.stream_width,
+            stream_height=quest_config.stream_height,
+            stream_fps=quest_config.stream_fps,
+            stream_jpeg_quality=quest_config.stream_jpeg_quality,
+        )
     return I2RTRobotBackend(
         config=config.common.robot,
         execution_target=config.common.execution_target,
@@ -106,16 +127,38 @@ def _create_default_quest3_action_producer(
     from .teleop.quest3 import Quest3ActionProducer, WebSocketQuestFrameReader
     from .teleop.yam_retargeter import YamQuestRetargeter
 
+    execution_target: ExecutionTarget = config.common.execution_target
+    quest_config: QuestConfig = config.common.quest
+    video_enabled: bool = (
+        execution_target == 'mujoco' and quest_config.display_mode == 'robot_camera'
+    ) or (
+        execution_target == 'real' and quest_config.show_real_wrist_camera
+    )
+    camera_id: str = 'wrist' if execution_target == 'real' else 'top'
+    camera_label: str = 'Wrist Camera' if execution_target == 'real' else 'MuJoCo'
+    camera_layout: str = 'wrist' if execution_target == 'real' else 'mujoco'
+    relay_config_message: dict[str, object] = {
+        'type': 'config_update',
+        'config': {
+            'video': {
+                'enabled': video_enabled,
+                'camera_id': camera_id,
+                'label': camera_label,
+                'layout': camera_layout,
+            },
+        },
+    }
     return Quest3ActionProducer(
         reader=WebSocketQuestFrameReader(
-            websocket_url=config.common.quest.websocket_url,
-            controller_hand=config.common.quest.controller_hand,
+            websocket_url=quest_config.websocket_url,
+            controller_hand=quest_config.controller_hand,
+            initial_message=relay_config_message,
         ),
         retargeter=YamQuestRetargeter(
             robot_config=config.common.robot,
-            quest_config=config.common.quest,
+            quest_config=quest_config,
         ),
-        max_frame_age_s=config.common.quest.max_frame_age_s,
+        max_frame_age_s=quest_config.max_frame_age_s,
     )
 
 

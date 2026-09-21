@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
+from PIL import Image
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
 # Notebook과 같은 방식으로 vendored yam-abc-reproduce를 import path에 추가
@@ -209,6 +211,31 @@ class CameraRigTest(unittest.TestCase):
                 rig.read_frames()
         finally:
             rig.close()
+
+    def test_wrist_frame_is_published_for_quest_stream(
+        self,
+    ) -> None:
+        '''Wrist RGB frame을 설정한 크기의 atomic JPEG file로 기록하는지 검증한다.'''
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            stream_frame_path: Path = Path(temporary_directory) / 'wrist-frame.jpg'
+            rig: CameraRig = CameraRig(
+                _camera_config(),
+                driver_factory=lambda config: FakeCameraDriver(config, timestamp_ms=10_000.0),
+                clock=FakeClock(10.1),
+                sleeper=_no_sleep,
+                stream_role='wrist',
+                stream_frame_path=str(stream_frame_path),
+                stream_width=640,
+                stream_height=480,
+                stream_fps=15.0,
+            )
+
+            rig.connect()
+            rig.read_frames()
+            rig.close()
+
+            with Image.open(stream_frame_path) as stream_image:
+                self.assertEqual(stream_image.size, (640, 480))
 
     def test_failed_camera_closes_already_opened_cameras(
         self,

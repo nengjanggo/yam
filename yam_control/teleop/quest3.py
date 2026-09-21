@@ -28,6 +28,13 @@ class WebSocketConnection(Protocol):
         '''WebSocket connection을 종료한다.'''
         ...
 
+    def send(
+        self,
+        message: str,
+    ) -> None:
+        '''WebSocket text message를 전송한다.'''
+        ...
+
 
 WebSocketConnector = Callable[[str, ssl.SSLContext | None, float], WebSocketConnection]
 
@@ -222,6 +229,7 @@ class WebSocketQuestFrameReader:
         self,
         websocket_url: str,
         controller_hand: QuestControllerHand,
+        initial_message: Mapping[str, object] | None = None,
         connector: WebSocketConnector = _connect_websocket,
         clock: Callable[[], float] = time.monotonic,
         open_timeout_s: float = 10.0,
@@ -233,6 +241,9 @@ class WebSocketQuestFrameReader:
             raise ValueError('open_timeout_s must be positive')
         self._websocket_url: str = websocket_url
         self._controller_hand: QuestControllerHand = controller_hand
+        self._initial_message: dict[str, object] | None = (
+            None if initial_message is None else dict(initial_message)
+        )
         self._connector: WebSocketConnector = connector
         self._clock: Callable[[], float] = clock
         self._open_timeout_s: float = open_timeout_s
@@ -289,6 +300,8 @@ class WebSocketQuestFrameReader:
             ssl_context,
             self._open_timeout_s,
         )
+        if self._initial_message is not None:
+            self._connection.send(json.dumps(self._initial_message))
         self._stop_event.clear()
         self._latest_frame = None
         self._received_frame_count = 0

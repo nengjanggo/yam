@@ -96,6 +96,7 @@ class FakeWebSocketConnection:
     ) -> None:
         '''전달할 message와 close 상태를 저장한다.'''
         self._messages: list[str] = messages
+        self.sent_messages: list[str] = []
         self.closed: bool = False
 
     def __iter__(
@@ -109,6 +110,13 @@ class FakeWebSocketConnection:
     ) -> None:
         '''Close 상태를 기록한다.'''
         self.closed = True
+
+    def send(
+        self,
+        message: str,
+    ) -> None:
+        '''Reader가 relay로 전송한 text message를 기록한다.'''
+        self.sent_messages.append(message)
 
 
 class FakeWebSocketConnector:
@@ -512,6 +520,28 @@ class Quest3ActionProducerTest(unittest.TestCase):
         self.assertTrue(frame.clutch_pressed)
         self.assertEqual(connector.websocket_url, 'ws://127.0.0.1:8443/ws')
         self.assertTrue(connection.closed)
+
+    def test_websocket_reader_sends_initial_relay_config(
+        self,
+    ) -> None:
+        '''Connect 직후 execution target별 video config를 relay에 전송하는지 검증한다.'''
+        connection: FakeWebSocketConnection = FakeWebSocketConnection(messages=[])
+        connector: FakeWebSocketConnector = FakeWebSocketConnector(connection=connection)
+        initial_message: dict[str, object] = {
+            'type': 'config_update',
+            'config': {'video': {'enabled': False}},
+        }
+        reader: WebSocketQuestFrameReader = WebSocketQuestFrameReader(
+            websocket_url='ws://127.0.0.1:8443/ws',
+            controller_hand='right',
+            initial_message=initial_message,
+            connector=connector,
+        )
+
+        reader.connect()
+        reader.close()
+
+        self.assertEqual(connection.sent_messages, [json.dumps(initial_message)])
 
     def test_websocket_reader_skips_temporary_tracking_loss(
         self,

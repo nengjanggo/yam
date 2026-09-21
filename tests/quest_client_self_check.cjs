@@ -12,14 +12,20 @@ async function main() {
     ['status', 'teleop-button', 'camera-preview', 'xr-canvas'].map((id) => [id, {
       textContent: '',
       disabled: true,
-      readyState: 0,
+      readyState: 2,
+      videoWidth: 640,
+      srcObject: null,
       addEventListener(type, listener) { this[type] = listener; },
       getContext() { return gl; },
     }]),
   );
+  let lastMvp = null;
+  let lastChromaKey = null;
   const gl = new Proxy({}, {
     get(target, key) {
       if (key === 'getShaderParameter' || key === 'getProgramParameter') return () => true;
+      if (key === 'uniformMatrix4fv') return (location, transpose, value) => { lastMvp = value; };
+      if (key === 'uniform1f') return (location, value) => { lastChromaKey = value; };
       if (key.startsWith('create')) return () => ({});
       return () => undefined;
     },
@@ -66,7 +72,10 @@ async function main() {
       },
     } },
     WebSocket: FakeWebSocket,
-    XRWebGLLayer: class { constructor() { this.framebuffer = {}; } },
+    XRWebGLLayer: class {
+      constructor() { this.framebuffer = {}; }
+      getViewport() { return { x: 0, y: 0, width: 1024, height: 1024 }; }
+    },
     RTCPeerConnection: class {},
     Float32Array,
     YamQuestInput: questInput,
@@ -76,8 +85,12 @@ async function main() {
   await Promise.resolve();
   websocket.emit('open');
   assert.equal(elements['teleop-button'].disabled, false);
-  websocket.emit('message', { type: 'camera_list', cameras: [{ id: 'top' }] });
+  websocket.emit('message', {
+    type: 'camera_list',
+    cameras: [{ id: 'wrist', label: 'Wrist Camera', layout: 'wrist' }],
+  });
   assert.equal(websocket.messages[0].type, 'webrtc_request');
+  assert.deepEqual(Array.from(websocket.messages[0].enabled_cameras), ['wrist']);
 
   await elements['teleop-button'].click();
   const pose = {
@@ -85,7 +98,14 @@ async function main() {
       position: { x: 0, y: 1, z: 0 },
       orientation: { x: 0, y: 0, z: 0, w: 1 },
     },
-    views: [],
+    views: [{
+      projectionMatrix: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
+      transform: {
+        inverse: {
+          matrix: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
+        },
+      },
+    }],
   };
   const frame = {
     getViewerPose: () => pose,
@@ -95,6 +115,14 @@ async function main() {
   assert.equal(websocket.messages[1].type, 'xr_frame');
   assert.equal(websocket.messages[1].controllers.right.buttons[1].p, true);
   assert.deepEqual(Array.from(websocket.messages[1].viewer.position), [0, 1, 0]);
+  assert.ok(Math.abs(lastMvp[0] - 0.28) < 1e-6);
+  assert.ok(Math.abs(lastMvp[5] - 0.21) < 1e-6);
+  assert.ok(lastMvp[12] > 0);
+  assert.ok(lastMvp[13] < 1);
+  assert.equal(lastChromaKey, 0);
+
+  websocket.emit('message', { type: 'camera_list', cameras: [] });
+  assert.equal(elements['camera-preview'].srcObject, null);
 }
 
 main();

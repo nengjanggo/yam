@@ -15,6 +15,7 @@ from PIL import Image
 
 from yam_control.teleop.mujoco_relay import (
     CAMERA_ID,
+    WRIST_CAMERA_ID,
     WEB_CLIENT_DIRECTORY,
     MujocoCameraTrack,
     MujocoFrameReader,
@@ -39,6 +40,27 @@ class FakeWebSocket:
     ) -> None:
         '''전송된 text message를 저장한다.'''
         self.messages.append(message)
+
+
+def _video_config_message(
+    enabled: bool,
+    camera_id: str = WRIST_CAMERA_ID,
+    layout: str = 'wrist',
+) -> str:
+    '''Relay video source를 설정하는 config_update JSON을 반환한다.'''
+    return json.dumps(
+        {
+            'type': 'config_update',
+            'config': {
+                'video': {
+                    'enabled': enabled,
+                    'camera_id': camera_id,
+                    'label': 'Wrist Camera',
+                    'layout': layout,
+                },
+            },
+        }
+    )
 
 
 def _write_frame(
@@ -120,6 +142,14 @@ def test_relay_echoes_ping_and_toggles_camera(
         '''Ping과 camera toggle message를 순서대로 처리한다.'''
         await relay.handle_message(
             client,
+            _video_config_message(
+                enabled=True,
+                camera_id=CAMERA_ID,
+                layout='mujoco',
+            ),
+        )
+        await relay.handle_message(
+            client,
             json.dumps({'type': 'ping', 't_client': 12.5}),
         )
         await relay.handle_message(
@@ -142,6 +172,57 @@ def test_relay_echoes_ping_and_toggles_camera(
     assert isinstance(response, dict)
     assert response['echo'] == {'type': 'ping', 't_client': 12.5}
     assert client.camera_track is None
+
+
+def test_relay_advertises_only_configured_video_source(
+    tmp_path: Path,
+) -> None:
+    '''Real wrist config와 비활성 config가 각각 wrist 하나와 빈 camera list를 공지하는지 검증한다.'''
+    reader: MujocoFrameReader = MujocoFrameReader(
+        frame_path=tmp_path / 'frame.jpg',
+        width=640,
+        height=480,
+    )
+    relay: MujocoRelay = MujocoRelay(frame_reader=reader, fps=15)
+    config_websocket: FakeWebSocket = FakeWebSocket()
+    quest_websocket: FakeWebSocket = FakeWebSocket()
+    config_client: RelayClient = RelayClient(
+        websocket=cast(WebSocket, config_websocket),
+    )
+    quest_client: RelayClient = RelayClient(
+        websocket=cast(WebSocket, quest_websocket),
+    )
+    relay.clients = {
+        cast(WebSocket, config_websocket): config_client,
+        cast(WebSocket, quest_websocket): quest_client,
+    }
+
+    async def run_config_check(
+    ) -> None:
+        '''Wrist 활성화 후 video 비활성화를 순서대로 전달한다.'''
+        await relay.handle_message(
+            config_client,
+            _video_config_message(enabled=True),
+        )
+        await relay.handle_message(
+            config_client,
+            _video_config_message(enabled=False),
+        )
+
+    asyncio.run(run_config_check())
+    wrist_camera_list: object = json.loads(quest_websocket.messages[0])
+    empty_camera_list: object = json.loads(quest_websocket.messages[1])
+
+    assert isinstance(wrist_camera_list, dict)
+    assert wrist_camera_list['cameras'] == [
+        {
+            'id': WRIST_CAMERA_ID,
+            'label': 'Wrist Camera',
+            'layout': 'wrist',
+        }
+    ]
+    assert isinstance(empty_camera_list, dict)
+    assert empty_camera_list['cameras'] == []
 
 
 def test_relay_broadcasts_xr_frame_to_other_client(

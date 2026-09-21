@@ -67,6 +67,7 @@ class QuestConfig:
     max_joint_delta_rad: float = 0.04
     ik_orientation_cost: float = 0.3
     max_frame_age_s: float = 0.25
+    show_real_wrist_camera: bool = False
     stream_frame_path: str = '/tmp/yam-mujoco-frame.jpg'
     stream_width: int = 640
     stream_height: int = 480

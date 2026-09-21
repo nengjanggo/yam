@@ -16,6 +16,7 @@
   let videoTexture = null;
   let videoBuffer = null;
   let videoAnchor = null;
+  let cameraLayout = 'none';
   let lastFrameSentAt = -Infinity;
 
   /** WebSocket이 열려 있을 때만 JSON message를 보낸다. */
@@ -40,7 +41,7 @@
     button.disabled = websocket.readyState !== WebSocket.OPEN;
   }
 
-  /** Relay offer에 응답하고 MuJoCo video track을 preview에 연결한다. */
+  /** Relay offer에 응답하고 선택된 video track을 preview에 연결한다. */
   async function acceptOffer(
     offer,
   ) {
@@ -52,7 +53,7 @@
       if (event.streams[0]) {
         video.srcObject = event.streams[0];
         video.play().catch(() => {
-          status.textContent = 'MuJoCo preview 자동 재생에 실패했습니다.';
+          status.textContent = 'Camera preview 자동 재생에 실패했습니다.';
         });
       }
     });
@@ -64,6 +65,17 @@
       sdp: peerConnection.localDescription.sdp,
       sdp_type: peerConnection.localDescription.type,
     });
+  }
+
+  /** 현재 WebRTC connection과 video frame을 비우고 panel을 숨긴다. */
+  function clearVideo() {
+    if (peerConnection) {
+      peerConnection.close();
+      peerConnection = null;
+    }
+    video.srcObject = null;
+    videoAnchor = null;
+    cameraLayout = 'none';
   }
 
   /** Shape `(4, 4)` column-major matrix 두 개를 곱한다. */
@@ -115,7 +127,7 @@
     return shader;
   }
 
-  /** MuJoCo video를 passthrough 위에 합성할 WebGL resource를 준비한다. */
+  /** Video를 passthrough 위에 합성할 WebGL resource를 준비한다. */
   function prepareVideo() {
     const vertexShader = compileShader(gl.VERTEX_SHADER, `
       attribute vec4 aVertex;
@@ -129,11 +141,13 @@
     const fragmentShader = compileShader(gl.FRAGMENT_SHADER, `
       precision mediump float;
       uniform sampler2D uVideo;
+      uniform float uUseChromaKey;
       varying vec2 vUv;
       void main() {
         vec4 color = texture2D(uVideo, vUv);
         float brightness = max(max(color.r, color.g), color.b);
-        gl_FragColor = vec4(color.rgb, smoothstep(0.015, 0.06, brightness));
+        float chromaAlpha = smoothstep(0.015, 0.06, brightness);
+        gl_FragColor = vec4(color.rgb, mix(1.0, chromaAlpha, uUseChromaKey));
       }
     `);
     videoProgram = gl.createProgram();
@@ -158,16 +172,22 @@
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   }
 
-  /** MuJoCo video frame을 panel texture로 올리고 양쪽 눈에 그린다. */
+  /** Video frame을 target별 panel layout으로 passthrough 위에 그린다. */
   function drawVideo(
     viewerPose,
     layer,
   ) {
-    if (video.readyState < 2 || !video.videoWidth) {
+    if (cameraLayout === 'none' || video.readyState < 2 || !video.videoWidth) {
       return;
     }
-    if (!videoAnchor) {
+    if (cameraLayout === 'mujoco' && !videoAnchor) {
       videoAnchor = anchorFromViewer(viewerPose);
+    }
+    const panelAnchor = cameraLayout === 'wrist'
+      ? anchorFromViewer(viewerPose)
+      : videoAnchor;
+    if (!panelAnchor) {
+      return;
     }
     gl.useProgram(videoProgram);
     gl.bindTexture(gl.TEXTURE_2D, videoTexture);
@@ -176,12 +196,25 @@
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.disable(gl.DEPTH_TEST);
-    const model = multiplyMatrices(videoAnchor, new Float32Array([
-      0.65, 0, 0, 0,
-      0, 0.49, 0, 0,
-      0, 0, 1, 0,
-      0, -0.75, -1.0, 1,
-    ]));
+    // MuJoCo는 큰 world-locked panel, wrist camera는 작은 head-locked 오른쪽 아래 panel을 사용
+    const panelTransform = cameraLayout === 'wrist'
+      ? new Float32Array([
+        0.28, 0, 0, 0,
+        0, 0.21, 0, 0,
+        0, 0, 1, 0,
+        0.30, -0.22, -0.70, 1,
+      ])
+      : new Float32Array([
+        0.65, 0, 0, 0,
+        0, 0.49, 0, 0,
+        0, 0, 1, 0,
+        0, -0.75, -1.0, 1,
+      ]);
+    const model = multiplyMatrices(panelAnchor, panelTransform);
+    gl.uniform1f(
+      gl.getUniformLocation(videoProgram, 'uUseChromaKey'),
+      cameraLayout === 'mujoco' ? 1.0 : 0.0,
+    );
     gl.bindBuffer(gl.ARRAY_BUFFER, videoBuffer);
     const vertexLocation = gl.getAttribLocation(videoProgram, 'aVertex');
     gl.enableVertexAttribArray(vertexLocation);
@@ -279,12 +312,17 @@
   });
   websocket.addEventListener('message', (event) => {
     const message = JSON.parse(event.data);
-    if (message.type === 'camera_list' && message.cameras.some((camera) => camera.id === 'top')) {
-      send({ type: 'webrtc_request', enabled_cameras: ['top'] });
+    if (message.type === 'camera_list') {
+      clearVideo();
+      const camera = message.cameras[0];
+      if (camera) {
+        cameraLayout = camera.layout;
+        send({ type: 'webrtc_request', enabled_cameras: [camera.id] });
+      }
     }
     if (message.type === 'webrtc_offer') {
       acceptOffer(message).catch(() => {
-        status.textContent = 'MuJoCo preview 연결에 실패했습니다.';
+        status.textContent = 'Camera preview 연결에 실패했습니다.';
       });
     }
   });

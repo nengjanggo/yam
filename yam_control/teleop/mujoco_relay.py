@@ -1,4 +1,4 @@
-'''Quest 3 WebSocket relay와 MuJoCo WebRTC camera stream을 제공한다.'''
+'''Quest 3 WebSocket relay와 execution target별 WebRTC video stream을 제공한다.'''
 
 from __future__ import annotations
 
@@ -27,11 +27,12 @@ from PIL import Image
 DEFAULT_FRAME_PATH: str = '/tmp/yam-mujoco-frame.jpg'
 CAMERA_ID: str = 'top'
 CAMERA_LABEL: str = 'MuJoCo'
+WRIST_CAMERA_ID: str = 'wrist'
+WRIST_CAMERA_LABEL: str = 'Wrist Camera'
 VIDEO_CLOCK_RATE: int = 90_000
 WEB_CLIENT_DIRECTORY: Path = Path(__file__).with_name('web')
 RELAY_MESSAGE_TYPES: frozenset[str] = frozenset(
     {
-        'config_update',
         'haptic_calibrate',
         'haptic_calibrate_result',
         'ik_state',
@@ -150,17 +151,76 @@ class RelayClient:
 
 
 class MujocoRelay:
-    '''Quest browser와 teleoperation process 사이 message와 video를 relay한다.'''
+    '''Quest browser와 teleoperation process 사이 message와 선택된 video를 relay한다.'''
 
     def __init__(
         self,
         frame_reader: MujocoFrameReader,
         fps: int,
     ) -> None:
-        '''MuJoCo frame reader와 연결 client registry를 초기화한다.'''
+        '''Frame reader와 연결 client registry를 video 비활성 상태로 초기화한다.'''
         self.frame_reader: MujocoFrameReader = frame_reader
         self.fps: int = fps
         self.clients: dict[WebSocket, RelayClient] = {}
+        self.camera_id: str | None = None
+        self.camera_label: str | None = None
+        self.camera_layout: str | None = None
+
+    def camera_descriptions(
+        self,
+    ) -> list[dict[str, str]]:
+        '''현재 활성화된 Quest video source description을 반환한다.'''
+        if self.camera_id is None or self.camera_label is None or self.camera_layout is None:
+            return []
+        return [
+            {
+                'id': self.camera_id,
+                'label': self.camera_label,
+                'layout': self.camera_layout,
+            }
+        ]
+
+    async def configure_video(
+        self,
+        message: Mapping[str, object],
+        sender: WebSocket,
+    ) -> None:
+        '''Runtime config로 video source를 교체하고 Quest client에 camera list를 알린다.'''
+        config_value: object = message.get('config')
+        config: Mapping[str, object] = config_value if isinstance(config_value, Mapping) else {}
+        video_value: object = config.get('video')
+        video: Mapping[str, object] = video_value if isinstance(video_value, Mapping) else {}
+        enabled: bool = bool(video.get('enabled', False))
+        camera_id: object = video.get('camera_id')
+        camera_label: object = video.get('label')
+        camera_layout: object = video.get('layout')
+        if enabled and not all(
+            isinstance(value, str) and value
+            for value in (camera_id, camera_label, camera_layout)
+        ):
+            raise ValueError('enabled video config requires camera_id, label and layout')
+        if enabled and camera_layout not in ('mujoco', 'wrist'):
+            raise ValueError(f'unsupported camera layout: {camera_layout}')
+        self.camera_id = str(camera_id) if enabled else None
+        self.camera_label = str(camera_label) if enabled else None
+        self.camera_layout = str(camera_layout) if enabled else None
+        clients: tuple[RelayClient, ...] = tuple(
+            client
+            for websocket, client in self.clients.items()
+            if websocket is not sender
+        )
+        await asyncio.gather(
+            *(self.close_peer_connection(client) for client in clients)
+        )
+        await self.broadcast(
+            json.dumps(
+                {
+                    'type': 'camera_list',
+                    'cameras': self.camera_descriptions(),
+                }
+            ),
+            sender,
+        )
 
     async def broadcast(
         self,
@@ -213,11 +273,13 @@ class MujocoRelay:
         client: RelayClient,
         message: Mapping[str, object],
     ) -> None:
-        '''MuJoCo camera track을 추가하고 WebRTC offer를 WebSocket으로 전송한다.'''
+        '''활성 video track을 추가하고 WebRTC offer를 WebSocket으로 전송한다.'''
         await self.close_peer_connection(client)
+        if self.camera_id is None:
+            return
         enabled_cameras_value: object = message.get('enabled_cameras')
         enabled_cameras: set[str] = (
-            {CAMERA_ID}
+            {self.camera_id}
             if not isinstance(enabled_cameras_value, list)
             else {str(camera_id) for camera_id in enabled_cameras_value}
         )
@@ -226,10 +288,10 @@ class MujocoRelay:
             reader=self.frame_reader,
             fps=self.fps,
         )
-        camera_track.enabled = CAMERA_ID in enabled_cameras
+        camera_track.enabled = self.camera_id in enabled_cameras
         sender: RTCRtpSender = peer_connection.addTrack(camera_track)
-        # Quest client가 MediaStream id로 camera slot을 연결하므로 top id를 지정
-        sender._stream_id = CAMERA_ID  # type: ignore[attr-defined]
+        # Quest client가 MediaStream id로 camera slot을 연결하므로 현재 camera id를 지정
+        sender._stream_id = self.camera_id  # type: ignore[attr-defined]
         client.peer_connection = peer_connection
         client.camera_track = camera_track
         self._prefer_h264(peer_connection)
@@ -252,7 +314,7 @@ class MujocoRelay:
                     'type': 'webrtc_offer',
                     'sdp': local_description.sdp,
                     'sdp_type': local_description.type,
-                    'cameras': [{'id': CAMERA_ID, 'label': CAMERA_LABEL}],
+                    'cameras': self.camera_descriptions(),
                 }
             )
         )
@@ -288,6 +350,9 @@ class MujocoRelay:
         message_type: object = message.get('type')
         if not isinstance(message_type, str):
             raise ValueError('WebSocket message type must be a string')
+        if message_type == 'config_update':
+            await self.configure_video(message, client.websocket)
+            return
         if message_type in RELAY_MESSAGE_TYPES:
             await self.broadcast(raw_message, client.websocket)
             return
@@ -298,7 +363,7 @@ class MujocoRelay:
             await self.accept_webrtc_answer(client, message)
             return
         if message_type == 'camera_toggle':
-            if client.camera_track is not None and message.get('camera_id') == CAMERA_ID:
+            if client.camera_track is not None and message.get('camera_id') == self.camera_id:
                 client.camera_track.enabled = bool(message.get('enabled', True))
             return
         if message_type in ('ice_candidate', 'latency_report'):
@@ -324,7 +389,7 @@ class MujocoRelay:
             json.dumps(
                 {
                     'type': 'camera_list',
-                    'cameras': [{'id': CAMERA_ID, 'label': CAMERA_LABEL}],
+                    'cameras': self.camera_descriptions(),
                 }
             )
         )
