@@ -261,6 +261,33 @@ def test_relay_broadcasts_xr_frame_to_other_client(
     assert recipient_websocket.messages == [raw_message]
 
 
+def test_relay_broadcasts_episode_status_to_quest(
+    tmp_path: Path,
+) -> None:
+    '''Teleoperation process의 episode_status가 Quest client로 전달되는지 검증한다.'''
+    reader: MujocoFrameReader = MujocoFrameReader(
+        frame_path=tmp_path / 'frame.jpg',
+        width=6,
+        height=4,
+    )
+    relay: MujocoRelay = MujocoRelay(frame_reader=reader, fps=15)
+    teleop_websocket: FakeWebSocket = FakeWebSocket()
+    quest_websocket: FakeWebSocket = FakeWebSocket()
+    teleop: RelayClient = RelayClient(
+        websocket=cast(WebSocket, teleop_websocket),
+    )
+    relay.clients = {
+        cast(WebSocket, teleop_websocket): teleop,
+        cast(WebSocket, quest_websocket): RelayClient(websocket=cast(WebSocket, quest_websocket)),
+    }
+    raw_message: str = json.dumps({'type': 'episode_status', 'phase': 'running'})
+
+    asyncio.run(relay.handle_message(teleop, raw_message))
+
+    assert teleop_websocket.messages == []
+    assert quest_websocket.messages == [raw_message]
+
+
 def test_app_owns_websocket_and_static_routes(
     tmp_path: Path,
 ) -> None:

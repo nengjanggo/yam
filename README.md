@@ -45,13 +45,3 @@ read -r RTC_UDP_START RTC_UDP_END < /proc/sys/net/ipv4/ip_local_port_range
 sudo ufw allow proto tcp from "$QUEST_IP" to any port 8443
 sudo ufw allow proto udp from "$QUEST_IP" to any port "${RTC_UDP_START}:${RTC_UDP_END}"
 ```
-
-## YAM, camera 설정
-
-Follower CAN interface를 I2RT가 사용하는 1 Mbit/s로 올린다.
-
-```bash
-ip -br link
-sudo ip link set can0 up type can bitrate 1000000
-ip -details link show can0
-```

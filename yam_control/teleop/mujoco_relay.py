@@ -33,6 +33,7 @@ VIDEO_CLOCK_RATE: int = 90_000
 WEB_CLIENT_DIRECTORY: Path = Path(__file__).with_name('web')
 RELAY_MESSAGE_TYPES: frozenset[str] = frozenset(
     {
+        'episode_status',
         'haptic_calibrate',
         'haptic_calibrate_result',
         'ik_state',

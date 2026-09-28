@@ -14,6 +14,7 @@ from yam_abc_reproduce.camera.interface import CameraDriver, CameraFrame
 from yam_abc_reproduce.camera.worker import CameraWorker
 
 from ..config import CameraConfig, CameraDeviceConfig
+from ..types import ObservationUnavailableError
 from .v4l2 import V4L2RGBCamera
 
 CameraDriverFactory = Callable[[CameraDeviceConfig], CameraDriver]
@@ -133,7 +134,7 @@ class CameraRig:
     def read_frames(
         self,
     ) -> dict[str, CameraFrame]:
-        '''Role별 최신 CameraFrame을 반환하고 오래된 frame이 있으면 RuntimeError를 발생시킨다.'''
+        '''Role별 최신 CameraFrame을 반환하고 frame이 없거나 오래됐으면 ObservationUnavailableError를 발생시킨다.'''
         if len(self._workers) != len(self._config.devices):
             raise RuntimeError('CameraRig is not connected')
         now_ms: float = self._clock() * 1000.0
@@ -144,10 +145,10 @@ class CameraRig:
         for role, worker in self._workers.items():
             frame: CameraFrame | None = worker.read()
             if frame is None:
-                raise RuntimeError(f'camera {role!r} has no frame')
+                raise ObservationUnavailableError(f'camera {role!r} has no frame')
             frame_age_ms: float = now_ms - frame.timestamp_ms
             if frame_age_ms > max_frame_age_ms:
-                raise RuntimeError(f'camera {role!r} frame is stale: {frame_age_ms:.0f} ms old')
+                raise ObservationUnavailableError(f'camera {role!r} frame is stale: {frame_age_ms:.0f} ms old')
             frames[role] = frame
         self._publish_stream_frame(frames)
         return frames

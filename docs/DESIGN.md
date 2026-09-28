@@ -2,9 +2,9 @@
 
 ## Configuration 축과 component 조합
 
-Run mode, action source, execution target, SafetyGate, recording과 RTC는 독립된 configuration 축으로 유지한다. [`create_session()`](../yam_control/factory.py#L351)이 이 축을 concrete component로 한 번만 변환하므로 runtime component는 다른 축의 조건문을 반복하지 않는다.
+Run mode, action source, execution target, SafetyGate, recording과 RTC는 독립된 configuration 축으로 유지한다. [`create_session()`](../yam_control/factory.py#L353)이 이 축을 concrete component로 한 번만 변환하므로 runtime component는 다른 축의 조건문을 반복하지 않는다.
 
-Teleoperation에서는 RTC가 의미 없으므로 `use_rtc`를 무시하고, MuJoCo에서는 실제 camera image와 simulation state가 섞인 dataset을 만들지 않도록 recording을 비활성화한다. 이 normalization은 [`build_run_config()`](../yam_control/config.py#L279)에서 수행한다.
+Teleoperation에서는 RTC가 의미 없으므로 `use_rtc`를 무시한다. 이 normalization은 [`build_run_config()`](../yam_control/config.py#L278)에서 수행한다. Recording은 별도 flag 없이 실제 robot teleoperation에서만 켜고, MuJoCo에서는 실제 camera image와 simulation state가 섞인 dataset을 만들지 않도록 끈다. 이 선택은 [`_select_recorder()`](../yam_control/factory.py#L333)가 담당한다.
 
 ## 실제 YAM과 MuJoCo의 공통 contract
 
@@ -30,19 +30,25 @@ SafetyGate는 action producer와 backend 사이에 단일 승인 지점으로 �
 
 ## Concurrency와 timing
 
-Camera capture와 Quest WebSocket 수신은 background worker가 담당하고 control loop는 최신 frame만 소비한다. I/O 지연이 control period를 직접 막지 않도록 하는 대신 stale frame을 명시적으로 거부한다. 구현 경계는 [`CameraRig`](../yam_control/camera/rig.py#L24)와 [`WebSocketQuestFrameReader`](../yam_control/teleop/quest3.py#L225)다.
+Camera capture와 Quest WebSocket 수신은 background worker가 담당하고 control loop는 최신 frame만 소비한다. I/O 지연이 control period를 직접 막지 않도록 하는 대신 stale frame을 명시적으로 거부한다. 구현 경계는 [`CameraRig`](../yam_control/camera/rig.py#L24)와 [`WebSocketQuestFrameReader`](../yam_control/teleop/quest3.py#L246)다.
 
 Control loop는 이전 sleep 시간에 누적해서 기다리지 않고 deadline을 기준으로 다음 tick을 예약한다. 처리가 한 주기보다 길어지면 밀린 tick을 몰아서 실행하지 않는다. 이 정책은 robot command burst를 피하고 recorder timestamp와 control frequency의 의미를 유지한다.
 
 ## Quest video 경로
 
-MuJoCo renderer와 실제 wrist camera는 target에 따라 같은 atomic JPEG/WebRTC 경로를 공유한다. 실제 wrist stream은 이미 capture한 `CameraFrame`을 재사용해 camera device를 두 번 열지 않는다. [`factory.py`](../yam_control/factory.py#L54)가 target별 video source를 선택하고 [`quest_client.js`](../yam_control/teleop/web/quest_client.js#L176)가 MuJoCo panel과 wrist panel의 presentation만 구분한다.
+MuJoCo renderer와 실제 wrist camera는 target에 따라 같은 atomic JPEG/WebRTC 경로를 공유한다. 실제 wrist stream은 이미 capture한 `CameraFrame`을 재사용해 camera device를 두 번 열지 않는다. [`factory.py`](../yam_control/factory.py#L54)가 target별 video source를 선택하고 [`quest_client.js`](../yam_control/teleop/web/quest_client.js#L245)가 MuJoCo panel과 wrist panel의 presentation만 구분한다.
+
+## 작업자 episode 흐름
+
+실제 robot teleoperation은 notebook cell 하나가 [`RunSession.run_operator_episodes()`](../yam_control/session.py#L342)로 여러 episode를 이어서 실행한다. 작업자는 headset을 벗지 않고 A/X button으로 결과 입력, 초기화와 시작을 진행하고, notebook interrupt로 loop를 끝낸다. Session은 button polling과 상태 표시를 optional [`EpisodeOperator`](../yam_control/interfaces.py#L90) boundary로만 사용해 VLA처럼 작업자 입력이 없는 action source는 기존 단일 episode 흐름을 유지한다.
+
+제한 step에 도달하면 자동 저장하지 않고 robot을 멈춘 뒤 성공(저장)과 실패(폐기) 입력을 기다린다. 저장 여부는 버튼 종류가 아니라 recorder의 완료 episode 수 증가로 판단하므로, 기록된 step 없이 성공을 눌러 yam-abc가 빈 episode를 지운 경우 "저장되지 않음"으로 표시한다. 상태는 relay의 `episode_status` message로 전달되고 [`quest_client.js`](../yam_control/teleop/web/quest_client.js#L356)가 시야 중앙 상단에 head-locked 알림으로 그린다. Python process가 멈추면 오래된 안내가 남지 않도록 10초 동안 갱신이 없으면 알림을 숨긴다.
 
 ## Recording 정책
 
 Dataset에는 action source가 제안한 action이 아니라 SafetyGate를 통과해 실제 backend에 전달된 action을 저장한다. Hold와 environment reset 구간을 제외해 observation/action pair의 의미를 유지한다. 측정 EE pose와 명령 EE pose를 모두 저장해 joint-space와 task-space 분석을 함께 지원한다.
 
-Video encoder는 hardware encoder보다 `libx264`를 사용한다. Hardware encoder initialization이 Python GIL을 오래 점유해 I2RT motor communication timeout을 유발했기 때문이다. Encoder 선택은 [`yam_abc.py`](../yam_control/data/yam_abc.py#L49)에 고정한다.
+Video encoder는 hardware encoder보다 `libx264`를 사용한다. Hardware encoder initialization이 Python GIL을 오래 점유해 I2RT motor communication timeout을 유발했기 때문이다. Encoder 선택은 [`yam_abc.py`](../yam_control/data/yam_abc.py#L50)에 고정한다.
 
 ## VLA와 RTC boundary
 

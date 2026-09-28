@@ -214,7 +214,6 @@ class TeleopRunConfig:
 
     mode: Literal['teleop'] = 'teleop'
     teleop_source: TeleopSourceType = 'quest3'
-    save_teleop_data: bool = False
 
     def __post_init__(
         self,
@@ -279,7 +278,6 @@ class RunConfig:
 def build_run_config(
     mode: RunMode,
     teleop_source: TeleopSourceType,
-    save_teleop_data: bool,
     vla_type: VLAType,
     checkpoint_uri: str,
     checkpoint_revision: str | None,
@@ -308,10 +306,8 @@ def build_run_config(
     mode_config: ModeConfig
     if mode == 'teleop':
         # Teleoperation에서는 전역 USE_RTC 값을 의도적으로 무시
-        # MuJoCo joint와 실제 camera image가 섞이지 않도록 MuJoCo에서는 SAVE_TELEOP_DATA를 무시
         mode_config = TeleopRunConfig(
             teleop_source=teleop_source,
-            save_teleop_data=save_teleop_data and execution_target == 'real',
         )
     else:
         mode_config = InferenceRunConfig(

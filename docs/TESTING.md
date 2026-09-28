@@ -24,10 +24,10 @@ jq empty yam.ipynb
 
 ## Integration 및 simulation test
 
-- Session lifecycle, hold exclusion, deadline scheduling과 abort: [`test_session.py`](../tests/test_session.py#L1)
+- Session lifecycle, hold exclusion, deadline scheduling, abort와 작업자 button 기반 연속 episode: [`test_session.py`](../tests/test_session.py#L1)
 - I2RT adapter의 real/simulation boundary와 resource lifecycle: [`test_i2rt_adapter.py`](../tests/test_i2rt_adapter.py#L1)
 - Relay protocol, JPEG cache와 WebRTC track: [`test_mujoco_relay.py`](../tests/test_mujoco_relay.py#L1)
-- Fake WebXR/browser 환경의 input payload와 video layout: [`quest_input_self_check.cjs`](../tests/quest_input_self_check.cjs#L1), [`quest_client_self_check.cjs`](../tests/quest_client_self_check.cjs#L1)
+- Fake WebXR/browser 환경의 input payload, video layout과 episode 상태 알림: [`quest_input_self_check.cjs`](../tests/quest_input_self_check.cjs#L1), [`quest_client_self_check.cjs`](../tests/quest_client_self_check.cjs#L1)
 - Headless MuJoCo model을 사용한 retargeting과 robot command path는 Python test suite에 포함한다.
 
 ## 실제 hardware 검증 현황

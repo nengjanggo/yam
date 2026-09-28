@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
-from .types import ActionChunk, RobotAction, RobotObservation, SafetyDecision
+from .types import ActionChunk, EpisodeStatus, OperatorButton, RobotAction, RobotObservation, SafetyDecision
 
 
 class RobotBackend(Protocol):
@@ -83,6 +83,24 @@ class ActionProducer(Protocol):
         self,
     ) -> None:
         '''Controller 또는 policy resource를 해제한다.'''
+        ...
+
+
+@runtime_checkable
+class EpisodeOperator(Protocol):
+    '''Episode 사이 작업자 button 입력과 episode 진행 상태 표시를 제공한다.'''
+
+    def poll_button(
+        self,
+    ) -> OperatorButton | None:
+        '''마지막 호출 이후 새로 눌린 button을 반환한다.'''
+        ...
+
+    def publish_episode_status(
+        self,
+        status: EpisodeStatus,
+    ) -> None:
+        '''Episode 진행 상태를 작업자 화면에 표시한다.'''
         ...
 
 

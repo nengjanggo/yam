@@ -47,7 +47,6 @@ def _build_config(
     return build_run_config(
         mode='teleop',
         teleop_source='quest3',
-        save_teleop_data=True,
         vla_type='pi0.5',
         checkpoint_uri='',
         checkpoint_revision=None,
@@ -137,12 +136,14 @@ class YamABCRecorderTest(unittest.TestCase):
         '''단일 arm과 top camera episode가 yam-abc default format으로 저장되는지 검증한다.'''
         with tempfile.TemporaryDirectory() as data_root:
             recorder = create_yam_abc_recorder(_build_config(data_root, _top_camera()))
+            self.assertEqual(recorder.saved_episode_count(), 0)
             recorder.start('pick up the object')
             step_index: int
             for step_index in range(5):
                 action: RobotAction = RobotAction(values=(0.1 * step_index, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0))
                 recorder.record(_observation(step_index), action)
             recorder.finish()
+            self.assertEqual(recorder.saved_episode_count(), 1)
 
             episode_dirs: list[Path] = list((Path(data_root) / 'pick_up_the_object').iterdir())
             self.assertEqual(len(episode_dirs), 1)
@@ -211,6 +212,20 @@ class YamABCRecorderTest(unittest.TestCase):
             recorder.abort()
 
             self.assertEqual(list((Path(data_root) / 'pick_up_the_object').iterdir()), [])
+            self.assertEqual(recorder.saved_episode_count(), 0)
+
+    def test_saved_episode_count_ignores_incomplete_episode(
+        self,
+    ) -> None:
+        '''완료 flag가 없는 episode 폴더는 저장 수에서 제외하는지 검증한다.'''
+        with tempfile.TemporaryDirectory() as data_root:
+            recorder = create_yam_abc_recorder(_build_config(data_root, _top_camera()))
+            task_directory: Path = Path(data_root) / 'pick_up_the_object'
+            (task_directory / 'complete').mkdir(parents=True)
+            (task_directory / 'complete' / 'write_complete.flag').write_text('')
+            (task_directory / 'partial').mkdir()
+
+            self.assertEqual(recorder.saved_episode_count(), 1)
 
 
 if __name__ == '__main__':

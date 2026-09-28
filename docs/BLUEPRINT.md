@@ -2,7 +2,7 @@
 
 ## 범위
 
-이 repository는 Meta Quest 3 teleoperation과 VLA inference를 동일한 runtime contract로 실행하며 `execution_target`으로 실제 YAM과 MuJoCo YAM을 전환한다. 실행 entry point는 [`yam.ipynb`](../yam.ipynb#L1), component 조합 entry point는 [`create_session()`](../yam_control/factory.py#L351)이다.
+이 repository는 Meta Quest 3 teleoperation과 VLA inference를 동일한 runtime contract로 실행하며 `execution_target`으로 실제 YAM과 MuJoCo YAM을 전환한다. 실행 entry point는 [`yam.ipynb`](../yam.ipynb#L1), component 조합 entry point는 [`create_session()`](../yam_control/factory.py#L353)이다.
 
 ## Repository 구조
 
@@ -39,19 +39,19 @@ RobotBackend ── RobotObservation ──► ActionProducer
                   EpisodeRecorder
 ```
 
-[`RunSession`](../yam_control/session.py#L16)이 component lifecycle과 control tick 순서를 소유한다. [`RuntimeDependencies`](../yam_control/factory.py#L276)는 구현체 교체 지점이며, mode와 execution target 선택은 [`factory.py`](../yam_control/factory.py#L54)에만 집중한다.
+[`RunSession`](../yam_control/session.py#L28)이 component lifecycle과 control tick 순서를 소유한다. [`RuntimeDependencies`](../yam_control/factory.py#L277)는 구현체 교체 지점이며, mode와 execution target 선택은 [`factory.py`](../yam_control/factory.py#L54)에만 집중한다.
 
 ## 주요 module
 
 | Directory | 책임과 public interface |
 |---|---|
-| `yam_control/config.py` | [`RunConfig`](../yam_control/config.py#L254), [`build_run_config()`](../yam_control/config.py#L279), [`with_camera_config()`](../yam_control/config.py#L332)가 실행 configuration을 정의한다. |
-| `yam_control/types.py` | [`RobotObservation`](../yam_control/types.py#L30), [`RobotAction`](../yam_control/types.py#L39), [`ActionChunk`](../yam_control/types.py#L46)가 component 간 data contract다. |
-| `yam_control/interfaces.py` | [`RobotBackend`](../yam_control/interfaces.py#L10), [`ActionProducer`](../yam_control/interfaces.py#L59), [`SafetyGate`](../yam_control/interfaces.py#L119), [`EpisodeRecorder`](../yam_control/interfaces.py#L137)를 정의한다. |
+| `yam_control/config.py` | [`RunConfig`](../yam_control/config.py#L253), [`build_run_config()`](../yam_control/config.py#L278), [`with_camera_config()`](../yam_control/config.py#L328)가 실행 configuration을 정의한다. |
+| `yam_control/types.py` | [`RobotObservation`](../yam_control/types.py#L62), [`RobotAction`](../yam_control/types.py#L71), [`ActionChunk`](../yam_control/types.py#L78)가 component 간 data contract다. |
+| `yam_control/interfaces.py` | [`RobotBackend`](../yam_control/interfaces.py#L10), [`ActionProducer`](../yam_control/interfaces.py#L59), [`SafetyGate`](../yam_control/interfaces.py#L137), [`EpisodeRecorder`](../yam_control/interfaces.py#L155)를 정의한다. |
 | `yam_control/robot/` | [`I2RTRobotBackend`](../yam_control/robot/i2rt_adapter.py#L103)가 실제 YAM과 MuJoCo YAM을 같은 interface로 감싼다. [`YamEndEffectorKinematics`](../yam_control/robot/kinematics.py#L17)는 recorder와 teleoperation이 공유하는 FK를 제공한다. |
-| `yam_control/teleop/` | [`Quest3ActionProducer`](../yam_control/teleop/quest3.py#L362)가 Quest frame lifecycle을 관리하고 [`YamQuestRetargeter`](../yam_control/teleop/yam_retargeter.py#L100)가 controller target을 joint action으로 변환한다. |
+| `yam_control/teleop/` | [`Quest3ActionProducer`](../yam_control/teleop/quest3.py#L399)가 Quest frame lifecycle을 관리하고 [`YamQuestRetargeter`](../yam_control/teleop/yam_retargeter.py#L100)가 controller target을 joint action으로 변환한다. |
 | `yam_control/camera/` | [`V4L2RGBCamera`](../yam_control/camera/v4l2.py#L20)가 한 device를 읽고 [`CameraRig`](../yam_control/camera/rig.py#L24)가 role별 worker lifecycle을 관리한다. |
-| `yam_control/data/` | [`YamABCRecorderAdapter`](../yam_control/data/recorder.py#L74)가 session recorder contract를 yam-abc episode format에 연결한다. |
+| `yam_control/data/` | [`YamABCRecorderAdapter`](../yam_control/data/recorder.py#L75)가 session recorder contract를 yam-abc episode format에 연결한다. |
 | `yam_control/policy/` | [`PiBackend`](../yam_control/policy/pi.py#L14)가 VLA loading boundary를, [`OpenLoopChunkExecutor`](../yam_control/policy/rtc.py#L9)가 chunk 실행 contract를 제공한다. |
 | `yam_control/safety/` | [`PassThroughSafetyGate`](../yam_control/safety/gates.py#L21)와 [`SweptPathSafetyGate`](../yam_control/safety/gates.py#L41)가 action 승인 정책을 제공한다. |
 
@@ -67,8 +67,9 @@ RobotBackend ── RobotObservation ──► ActionProducer
 
 ## Lifecycle과 invariant
 
-- [`RunSession.connect()`](../yam_control/session.py#L47) 이후에만 episode를 준비하며 [`RunSession.close()`](../yam_control/session.py#L239)가 모든 resource를 해제한다.
+- [`RunSession.connect()`](../yam_control/session.py#L62) 이후에만 episode를 준비하며 [`RunSession.close()`](../yam_control/session.py#L395)가 모든 resource를 해제한다.
 - 실제 robot은 작업자 environment reset과 `episode_initial_pose` 이동을 recording 밖에서 수행한다.
+- 실제 robot teleoperation은 제한 step에 도달해도 자동 저장하지 않고 작업자의 성공(저장) 또는 실패(폐기) 입력을 기다린다.
 - Recorder는 SafetyGate를 통과해 backend에 전달된 action만 저장한다.
 - Hold step, initial pose 이동과 environment reset 구간은 episode sample에 포함하지 않는다.
 - Camera role은 episode 전체에서 고정되고 stale frame은 재사용하지 않는다.

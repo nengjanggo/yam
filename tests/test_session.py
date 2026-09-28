@@ -15,7 +15,16 @@ from yam_control.config import (
     build_run_config,
 )
 from yam_control.session import RunSession
-from yam_control.types import EpisodeOutcome, EpisodeState, RobotAction, RobotObservation, SafetyDecision
+from yam_control.types import (
+    EpisodeOutcome,
+    EpisodePhase,
+    EpisodeState,
+    EpisodeStatus,
+    OperatorButton,
+    RobotAction,
+    RobotObservation,
+    SafetyDecision,
+)
 
 
 class FakeRobot:
@@ -272,6 +281,92 @@ class FakeRecorder:
         self.abort_count += 1
 
 
+class OperatorActionProducer(OutcomeActionProducer):
+    '''Episode 사이 button 입력을 순서대로 반환하고 표시된 episode status를 기록한다.'''
+
+    def __init__(
+        self,
+        action: RobotAction,
+        buttons: tuple[OperatorButton | None, ...],
+        outcome: EpisodeOutcome = EpisodeOutcome.SUCCESS,
+        outcome_at_step: int = -1,
+    ) -> None:
+        '''Polling마다 반환할 button 순서와 optional episode 도중 종료 입력을 저장한다.'''
+        super().__init__(action=action, outcome=outcome, outcome_at_step=outcome_at_step)
+        self._buttons: Iterator[OperatorButton | None] = iter(buttons)
+        self.statuses: list[EpisodeStatus] = []
+
+    def poll_button(
+        self,
+    ) -> OperatorButton | None:
+        '''다음 button을 반환하고 입력이 끝나면 notebook interrupt를 발생시킨다.'''
+        try:
+            return next(self._buttons)
+        except StopIteration:
+            raise KeyboardInterrupt from None
+
+    def publish_episode_status(
+        self,
+        status: EpisodeStatus,
+    ) -> None:
+        '''표시 요청된 episode status를 기록한다.'''
+        self.statuses.append(status)
+
+    def phases(
+        self,
+    ) -> list[EpisodePhase]:
+        '''연속 중복을 제거한 표시 단계 순서를 반환한다.'''
+        phases: list[EpisodePhase] = []
+        status: EpisodeStatus
+        for status in self.statuses:
+            if not phases or phases[-1] is not status.phase:
+                phases.append(status.phase)
+        return phases
+
+
+class CountingRecorder(FakeRecorder):
+    '''Record가 있는 episode를 finish하면 저장 완료 수를 증가시키는 recorder이다.'''
+
+    def __init__(
+        self,
+    ) -> None:
+        '''저장 완료 수와 현재 episode record 수를 0으로 초기화한다.'''
+        super().__init__()
+        self.saved_count: int = 0
+        self._episode_record_count: int = 0
+
+    def start(
+        self,
+        task_prompt: str,
+    ) -> None:
+        '''현재 episode record 수를 초기화한다.'''
+        super().start(task_prompt)
+        self._episode_record_count = 0
+
+    def record(
+        self,
+        observation: RobotObservation,
+        action: RobotAction,
+    ) -> None:
+        '''현재 episode record 수를 증가시킨다.'''
+        super().record(observation, action)
+        self._episode_record_count += 1
+
+    def finish(
+        self,
+    ) -> None:
+        '''yam-abc처럼 빈 episode는 저장하지 않고 나머지만 저장 완료로 센다.'''
+        super().finish()
+        if self._episode_record_count > 0:
+            self.saved_count += 1
+
+    def saved_episode_count(
+        self,
+    ) -> int:
+        '''저장 완료 episode 수를 반환한다.'''
+        return self.saved_count
+
+
 class FakeClock:
     '''제어 step 경계에 결정적인 시각을 제공한다.'''
 
@@ -305,7 +400,6 @@ def _build_config(
     return build_run_config(
         mode='teleop',
         teleop_source='leader',
-        save_teleop_data=False,
         vla_type='pi0',
         checkpoint_uri='',
         checkpoint_revision=None,
@@ -635,6 +729,195 @@ class SessionRecordingTest(unittest.TestCase):
 
         self.assertEqual(session.state, EpisodeState.ABORTED)
         self.assertEqual(recorder.abort_count, 1)
+
+
+class OperatorEpisodeTest(unittest.TestCase):
+    '''Quest button 기반 제한 시간 결과 입력과 연속 episode 흐름을 검증한다.'''
+
+    def test_time_limit_waits_for_success_and_saves(
+        self,
+    ) -> None:
+        '''제한 step 도달 시 robot을 멈추고 A 입력을 기다린 뒤 저장하는지 검증한다.'''
+        config: RunConfig = _build_config(execution_target='real')
+        robot: FakeRobot = FakeRobot()
+        recorder: CountingRecorder = CountingRecorder()
+        producer: OperatorActionProducer = OperatorActionProducer(
+            action=FIXED_ACTION,
+            buttons=(None, OperatorButton.PRIMARY),
+        )
+        session: RunSession = _build_session(config, robot, FakeSafetyGate(True), recorder, producer=producer)
+
+        session.connect()
+        session.prepare_episode()
+        state: EpisodeState = session.run_prepared_episode(max_steps=3)
+        awaiting: list[EpisodeStatus] = [
+            status for status in producer.statuses if status.phase is EpisodePhase.AWAITING_OUTCOME
+        ]
+        ended: EpisodeStatus = producer.statuses[-1]
+
+        self.assertEqual(state, EpisodeState.SUCCEEDED)
+        self.assertEqual(recorder.finish_count, 1)
+        self.assertEqual(recorder.abort_count, 0)
+        self.assertEqual(
+            producer.phases(),
+            [EpisodePhase.RUNNING, EpisodePhase.AWAITING_OUTCOME, EpisodePhase.SAVING, EpisodePhase.ENDED],
+        )
+        self.assertAlmostEqual(producer.statuses[0].limit_s, 0.1)
+        self.assertAlmostEqual(awaiting[0].elapsed_s, 0.1)
+        self.assertEqual(ended.last_state, EpisodeState.SUCCEEDED)
+        self.assertTrue(ended.last_episode_saved)
+        self.assertEqual(ended.saved_episode_count, 1)
+
+    def test_time_limit_failure_discards_episode(
+        self,
+    ) -> None:
+        '''제한 step 도달 후 B 입력이면 저장 없이 DISCARDED로 끝나는지 검증한다.'''
+        config: RunConfig = _build_config(execution_target='real')
+        recorder: CountingRecorder = CountingRecorder()
+        producer: OperatorActionProducer = OperatorActionProducer(
+            action=FIXED_ACTION,
+            buttons=(OperatorButton.SECONDARY,),
+        )
+        session: RunSession = _build_session(config, FakeRobot(), FakeSafetyGate(True), recorder, producer=producer)
+
+        session.connect()
+        session.prepare_episode()
+        state: EpisodeState = session.run_prepared_episode(max_steps=2)
+
+        self.assertEqual(state, EpisodeState.DISCARDED)
+        self.assertEqual(recorder.finish_count, 0)
+        self.assertEqual(recorder.abort_count, 1)
+        self.assertFalse(producer.statuses[-1].last_episode_saved)
+        self.assertEqual(producer.statuses[-1].saved_episode_count, 0)
+
+    def test_success_without_recorded_step_is_reported_unsaved(
+        self,
+    ) -> None:
+        '''Grip 없이 A를 눌러 기록된 step이 없으면 저장되지 않음으로 표시하는지 검증한다.'''
+        config: RunConfig = _build_config(execution_target='real')
+        producer: OperatorActionProducer = OperatorActionProducer(
+            action=FIXED_ACTION,
+            buttons=(),
+            outcome=EpisodeOutcome.SUCCESS,
+            outcome_at_step=0,
+        )
+        session: RunSession = _build_session(
+            config,
+            FakeRobot(),
+            FakeSafetyGate(True),
+            CountingRecorder(),
+            producer=producer,
+        )
+
+        session.connect()
+        session.prepare_episode()
+        state: EpisodeState = session.run_prepared_episode(max_steps=5)
+
+        self.assertEqual(state, EpisodeState.SUCCEEDED)
+        self.assertFalse(producer.statuses[-1].last_episode_saved)
+
+    def test_operator_loop_prepares_and_starts_with_primary_button(
+        self,
+    ) -> None:
+        '''Episode 종료 후 A로 초기화, 다시 A로 시작하고 interrupt 시 결과를 반환하는지 검증한다.'''
+        config: RunConfig = _build_config(execution_target='real')
+        robot: FakeRobot = FakeRobot()
+        recorder: CountingRecorder = CountingRecorder()
+        producer: OperatorActionProducer = OperatorActionProducer(
+            action=FIXED_ACTION,
+            buttons=(
+                # 첫 episode 제한 시간 도달 후 성공
+                OperatorButton.PRIMARY,
+                # 초기화 대기 중 B는 무시하고 A로 초기화, A로 시작
+                OperatorButton.SECONDARY,
+                OperatorButton.PRIMARY,
+                OperatorButton.PRIMARY,
+                # 두 번째 episode 제한 시간 도달 후 실패, 이후 입력 없이 notebook interrupt
+                OperatorButton.SECONDARY,
+            ),
+        )
+        session: RunSession = _build_session(config, robot, FakeSafetyGate(True), recorder, producer=producer)
+
+        session.connect()
+        session.prepare_episode()
+        states: tuple[EpisodeState, ...] = session.run_operator_episodes(max_steps=2)
+        reset_pose_moves: int = sum(
+            event == ('move_to_pose', config.common.robot.human_reset_pose) for event in robot.events
+        )
+
+        self.assertEqual(states, (EpisodeState.SUCCEEDED, EpisodeState.DISCARDED))
+        self.assertEqual(reset_pose_moves, 2)
+        self.assertEqual(recorder.saved_count, 1)
+        self.assertEqual(
+            producer.phases(),
+            [
+                EpisodePhase.RUNNING,
+                EpisodePhase.AWAITING_OUTCOME,
+                EpisodePhase.SAVING,
+                EpisodePhase.ENDED,
+                EpisodePhase.WAITING_PREPARE,
+                EpisodePhase.PREPARING,
+                EpisodePhase.WAITING_START,
+                EpisodePhase.STARTING,
+                EpisodePhase.RUNNING,
+                EpisodePhase.AWAITING_OUTCOME,
+                EpisodePhase.ENDED,
+                EpisodePhase.WAITING_PREPARE,
+                EpisodePhase.IDLE,
+            ],
+        )
+        waiting_prepare: EpisodeStatus = next(
+            status for status in producer.statuses if status.phase is EpisodePhase.WAITING_PREPARE
+        )
+        second_running: EpisodeStatus = [
+            status for status in producer.statuses if status.phase is EpisodePhase.RUNNING
+        ][-1]
+        self.assertEqual(waiting_prepare.last_state, EpisodeState.SUCCEEDED)
+        self.assertEqual(waiting_prepare.saved_episode_count, 1)
+        self.assertIsNone(second_running.last_state)
+
+    def test_operator_loop_interrupt_during_episode_aborts_it(
+        self,
+    ) -> None:
+        '''Episode 도중 notebook interrupt는 저장 없이 ABORTED로 기록하고 loop를 끝내는지 검증한다.'''
+        config: RunConfig = _build_config(execution_target='real')
+        recorder: CountingRecorder = CountingRecorder()
+        producer: OperatorActionProducer = OperatorActionProducer(action=FIXED_ACTION, buttons=())
+
+        def interrupting_sleep(
+            duration_s: float,
+        ) -> None:
+            '''첫 sleep에서 KeyboardInterrupt를 발생시킨다.'''
+            del duration_s
+            raise KeyboardInterrupt
+
+        session: RunSession = RunSession(
+            config=config,
+            robot=FakeRobot(),
+            action_producer=producer,
+            safety_gate=FakeSafetyGate(True),
+            recorder=recorder,
+            sleeper=interrupting_sleep,
+        )
+
+        session.connect()
+        session.prepare_episode()
+        states: tuple[EpisodeState, ...] = session.run_operator_episodes(max_steps=5)
+
+        self.assertEqual(states, (EpisodeState.ABORTED,))
+        self.assertEqual(recorder.abort_count, 1)
+        self.assertEqual(producer.statuses[-1].phase, EpisodePhase.IDLE)
+
+    def test_operator_loop_requires_operator_input(
+        self,
+    ) -> None:
+        '''Button 입력이 없는 action source로는 연속 episode loop를 시작하지 않는지 검증한다.'''
+        config: RunConfig = _build_config(execution_target='real')
+        session: RunSession = _build_session(config, FakeRobot(), FakeSafetyGate(True), FakeRecorder())
+
+        session.connect()
+        with self.assertRaisesRegex(RuntimeError, 'operator button input'):
+            session.run_operator_episodes(max_steps=1)
 
 
 if __name__ == '__main__':

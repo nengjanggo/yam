@@ -19,11 +19,49 @@ class EpisodeState(Enum):
     ABORTED = 'aborted'
 
 
+class ObservationUnavailableError(RuntimeError):
+    '''Camera 같은 sensor data가 일시적으로 끊기거나 오래돼 observation을 만들 수 없음을 나타낸다.'''
+
+
 class EpisodeOutcome(Enum):
     '''작업자가 episode 도중 입력한 조기 종료 결과를 나타낸다.'''
 
     SUCCESS = 'success'
     FAILURE = 'failure'
+
+
+class OperatorButton(Enum):
+    '''Episode 사이 작업자가 누른 controller button을 나타낸다.'''
+
+    PRIMARY = 'primary'
+    SECONDARY = 'secondary'
+
+
+class EpisodePhase(Enum):
+    '''작업자 화면에 표시할 episode 진행 단계를 나타낸다.'''
+
+    RUNNING = 'running'
+    AWAITING_OUTCOME = 'awaiting_outcome'
+    SAVING = 'saving'
+    ENDED = 'ended'
+    WAITING_PREPARE = 'waiting_prepare'
+    PREPARING = 'preparing'
+    WAITING_START = 'waiting_start'
+    STARTING = 'starting'
+    IDLE = 'idle'
+
+
+@dataclass(frozen=True)
+class EpisodeStatus:
+    '''작업자 화면에 표시할 episode 진행 단계, 경과 시간과 저장 결과를 보관한다.'''
+
+    phase: EpisodePhase
+    elapsed_s: float | None = None
+    limit_s: float | None = None
+    last_state: EpisodeState | None = None
+    last_episode_saved: bool | None = None
+    saved_episode_count: int | None = None
+    warning: str | None = None
 
 
 @dataclass(frozen=True)

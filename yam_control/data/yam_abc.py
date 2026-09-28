@@ -14,8 +14,8 @@ from yam_abc_reproduce.data import codec
 from yam_abc_reproduce.config import CameraConfig as YamABCCameraConfig
 from yam_abc_reproduce.config import RobotConfig as YamABCRobotConfig
 from yam_abc_reproduce.config import StationConfig
-from yam_abc_reproduce.data.recorder import EpisodeRecorder
-from yam_abc_reproduce.data.schema import EpisodeMeta
+from yam_abc_reproduce.data.recorder import EpisodeRecorder, task_slug
+from yam_abc_reproduce.data.schema import WRITE_COMPLETE_FLAG, EpisodeMeta
 
 from ..config import CameraDeviceConfig, RunConfig
 from ..robot.kinematics import GRASP_SITE_NAME, YamEndEffectorKinematics
@@ -196,7 +196,7 @@ def create_yam_abc_recorder(
     '''RunConfig의 단일 arm과 camera 설정으로 yam-abc EpisodeRecorder adapter를 생성한다.'''
     devices: tuple[CameraDeviceConfig, ...] = config.common.camera.devices
     if not devices:
-        raise ValueError('save_teleop_data requires at least one camera in CameraConfig.devices')
+        raise ValueError('teleoperation recording requires at least one camera in CameraConfig.devices')
     _pin_video_encoder()
     # Frame은 control step마다 저장되므로 video fps는 control frequency와 같아야 함
     video_fps: int = round(config.common.control_hz)
@@ -234,4 +234,7 @@ def create_yam_abc_recorder(
             camera_roles=config.common.camera.roles,
             kinematics=YamEndEffectorKinematics(config.common.robot.gripper_type),
         ),
+        # yam-abc recorder가 episode를 저장하는 task 폴더
+        episode_directory=Path(config.data_root) / task_slug(config.task_prompt),
+        complete_flag_name=WRITE_COMPLETE_FLAG,
     )

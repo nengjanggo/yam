@@ -6,7 +6,7 @@ import unittest
 from dataclasses import replace
 from typing import cast
 
-from yam_control import create_session
+from yam_control import RuntimeDependencies, create_session
 from yam_control.config import (
     CameraConfig,
     CameraDeviceConfig,
@@ -20,19 +20,20 @@ from yam_control.config import (
     build_run_config,
     with_camera_config,
 )
+from yam_control.data import NullRecorder
+from yam_control.factory import _select_recorder
+from yam_control.interfaces import EpisodeRecorder
 
 
 def _build_config(
     mode: RunMode,
     use_rtc: bool,
-    save_teleop_data: bool = False,
     execution_target: ExecutionTarget = 'mujoco',
 ) -> RunConfig:
     '''Test에 필요한 최소 RunConfig를 생성한다.'''
     return build_run_config(
         mode=mode,
         teleop_source='quest3',
-        save_teleop_data=save_teleop_data,
         vla_type='pi0.5',
         checkpoint_uri='checkpoint',
         checkpoint_revision=None,
@@ -72,28 +73,38 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(mode_config.vla_type, 'pi0.5')
         self.assertTrue(config.rtc_enabled)
 
-    def test_mujoco_ignores_save_teleop_data(
+    def test_mujoco_teleop_does_not_record(
         self,
     ) -> None:
-        '''MuJoCo에서는 SAVE_TELEOP_DATA가 True여도 recording을 끄는지 검증한다.'''
-        config: RunConfig = _build_config(mode='teleop', use_rtc=False, save_teleop_data=True)
-        mode_config: TeleopRunConfig = cast(TeleopRunConfig, config.mode_config)
+        '''MuJoCo teleoperation은 실제 camera image와 섞이지 않도록 저장하지 않는지 검증한다.'''
+        config: RunConfig = _build_config(mode='teleop', use_rtc=False)
 
-        self.assertFalse(mode_config.save_teleop_data)
+        def unexpected_recorder(
+            run_config: RunConfig,
+        ) -> EpisodeRecorder:
+            '''MuJoCo에서 external recorder가 생성되면 test를 실패시킨다.'''
+            raise AssertionError(f'unexpected recorder for {run_config.common.execution_target}')
 
-    def test_real_keeps_save_teleop_data(
-        self,
-    ) -> None:
-        '''Real robot에서는 SAVE_TELEOP_DATA 값을 유지하는지 검증한다.'''
-        config: RunConfig = _build_config(
-            mode='teleop',
-            use_rtc=False,
-            save_teleop_data=True,
-            execution_target='real',
+        recorder: EpisodeRecorder = _select_recorder(
+            config,
+            RuntimeDependencies(recorder_factory=unexpected_recorder),
         )
-        mode_config: TeleopRunConfig = cast(TeleopRunConfig, config.mode_config)
 
-        self.assertTrue(mode_config.save_teleop_data)
+        self.assertIsInstance(recorder, NullRecorder)
+
+    def test_real_teleop_always_records(
+        self,
+    ) -> None:
+        '''실제 robot teleoperation은 별도 flag 없이 external recorder를 사용하는지 검증한다.'''
+        config: RunConfig = _build_config(mode='teleop', use_rtc=False, execution_target='real')
+        external_recorder: NullRecorder = NullRecorder()
+        dependencies: RuntimeDependencies = RuntimeDependencies(
+            recorder_factory=lambda run_config: external_recorder,
+        )
+
+        recorder: EpisodeRecorder = _select_recorder(config, dependencies)
+
+        self.assertIs(recorder, external_recorder)
 
     def test_with_camera_config_replaces_only_camera(
         self,
@@ -182,7 +193,6 @@ class ConfigTest(unittest.TestCase):
         config: RunConfig = build_run_config(
             mode='inference',
             teleop_source='leader',
-            save_teleop_data=False,
             vla_type='groot',
             checkpoint_uri='',
             checkpoint_revision=None,
@@ -208,7 +218,6 @@ class ConfigTest(unittest.TestCase):
         config: RunConfig = build_run_config(
             mode='teleop',
             teleop_source='leader',
-            save_teleop_data=False,
             vla_type='pi0.5',
             checkpoint_uri='',
             checkpoint_revision=None,

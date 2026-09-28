@@ -159,6 +159,7 @@ def _create_default_quest3_action_producer(
             quest_config=quest_config,
         ),
         max_frame_age_s=quest_config.max_frame_age_s,
+        controller_hand=quest_config.controller_hand,
     )
 
 
@@ -333,11 +334,12 @@ def _select_recorder(
     config: RunConfig,
     dependencies: RuntimeDependencies,
 ) -> EpisodeRecorder:
-    '''Teleoperation recording boolean에 따라 NullRecorder 또는 external recorder를 선택한다.'''
+    '''실제 robot teleoperation이면 external recorder를, 그 외에는 NullRecorder를 선택한다.'''
     mode_config: TeleopRunConfig | InferenceRunConfig = config.mode_config
+    # MuJoCo joint와 실제 camera image가 섞이지 않도록 실제 robot teleoperation만 저장
     should_record: bool = (
         isinstance(mode_config, TeleopRunConfig)
-        and mode_config.save_teleop_data
+        and config.common.execution_target == 'real'
     )
     if not should_record:
         return NullRecorder()

@@ -10,7 +10,16 @@ from collections.abc import Callable, Iterator, Mapping
 from typing import Protocol, cast
 
 from ..config import QuestControllerHand
-from ..types import EpisodeOutcome, QuestFrame, QuestPose, RobotAction, RobotObservation
+from ..types import (
+    EpisodeOutcome,
+    EpisodeState,
+    EpisodeStatus,
+    OperatorButton,
+    QuestFrame,
+    QuestPose,
+    RobotAction,
+    RobotObservation,
+)
 
 
 class WebSocketConnection(Protocol):
@@ -41,6 +50,11 @@ WebSocketConnector = Callable[[str, ssl.SSLContext | None, float], WebSocketConn
 # WebXR xr-standard gamepad mapping에서 Quest Touch controller의 A/X와 B/Y button index
 PRIMARY_BUTTON_INDEX: int = 4
 SECONDARY_BUTTON_INDEX: int = 5
+# Quest 화면 알림에 표시할 controller별 primary와 secondary button 이름
+BUTTON_LABELS: dict[str, tuple[str, str]] = {
+    'right': ('A', 'B'),
+    'left': ('X', 'Y'),
+}
 
 
 def create_websocket_ssl_context(
@@ -195,6 +209,13 @@ class QuestFrameReader(Protocol):
         '''Quest frame 수신 상태 진단값을 반환한다.'''
         ...
 
+    def send(
+        self,
+        message: Mapping[str, object],
+    ) -> None:
+        '''WebXR relay로 JSON message를 전송한다.'''
+        ...
+
     def close(
         self,
     ) -> None:
@@ -345,6 +366,22 @@ class WebSocketQuestFrameReader:
             'latest_frame_age_s': latest_frame_age_s,
         }
 
+    def send(
+        self,
+        message: Mapping[str, object],
+    ) -> None:
+        '''연결된 relay로 JSON message를 전송하고 끊긴 connection이면 무시한다.'''
+        from websockets.exceptions import ConnectionClosed
+
+        connection: WebSocketConnection | None = self._connection
+        if connection is None:
+            return
+        try:
+            connection.send(json.dumps(message))
+        except ConnectionClosed:
+            # 표시용 message이므로 relay 연결 끊김은 stale-frame hold가 처리하도록 둠
+            return
+
     def close(
         self,
     ) -> None:
@@ -360,7 +397,7 @@ class WebSocketQuestFrameReader:
 
 
 class Quest3ActionProducer:
-    '''Clutch-relative mapping, stale-frame safety와 A/B button episode 종료 입력을 적용한다.'''
+    '''Clutch-relative mapping, stale-frame safety, A/B button 입력과 episode 상태 표시를 제공한다.'''
 
     def __init__(
         self,
@@ -368,10 +405,14 @@ class Quest3ActionProducer:
         retargeter: QuestRetargeter,
         clock: Callable[[], float] = time.monotonic,
         max_frame_age_s: float = 0.25,
+        controller_hand: QuestControllerHand = 'right',
     ) -> None:
-        '''Quest reader, YAM retargeter와 stale-frame 제한을 저장한다.'''
+        '''Quest reader, YAM retargeter, stale-frame 제한과 button 이름용 controller hand를 저장한다.'''
         if max_frame_age_s <= 0.0:
             raise ValueError('max_frame_age_s must be positive')
+        if controller_hand not in BUTTON_LABELS:
+            raise ValueError(f'unsupported controller_hand: {controller_hand}')
+        self._button_labels: tuple[str, str] = BUTTON_LABELS[controller_hand]
         self._reader: QuestFrameReader = reader
         self._retargeter: QuestRetargeter = retargeter
         self._clock: Callable[[], float] = clock
@@ -424,15 +465,25 @@ class Quest3ActionProducer:
         self._hold_reason_counts[reason] = self._hold_reason_counts.get(reason, 0) + 1
         return RobotAction(values=observation.state)
 
+    def _consume_button_presses(
+        self,
+        frame: QuestFrame,
+    ) -> tuple[bool, bool]:
+        '''A/X와 B/Y button이 이번 frame에서 새로 눌렸는지 반환하고 이전 상태를 갱신한다.'''
+        primary_pressed_now: bool = frame.primary_button_pressed and not self._primary_button_was_pressed
+        secondary_pressed_now: bool = frame.secondary_button_pressed and not self._secondary_button_was_pressed
+        self._primary_button_was_pressed = frame.primary_button_pressed
+        self._secondary_button_was_pressed = frame.secondary_button_pressed
+        return primary_pressed_now, secondary_pressed_now
+
     def _update_episode_outcome(
         self,
         frame: QuestFrame,
     ) -> None:
         '''A/X button의 새 press를 성공, B/Y button의 새 press를 실패 episode로 기록한다.'''
-        primary_pressed_now: bool = frame.primary_button_pressed and not self._primary_button_was_pressed
-        secondary_pressed_now: bool = frame.secondary_button_pressed and not self._secondary_button_was_pressed
-        self._primary_button_was_pressed = frame.primary_button_pressed
-        self._secondary_button_was_pressed = frame.secondary_button_pressed
+        primary_pressed_now: bool
+        secondary_pressed_now: bool
+        primary_pressed_now, secondary_pressed_now = self._consume_button_presses(frame)
         if self.episode_outcome is not None:
             return
         # 두 button이 같은 frame에서 눌리면 저장하지 않는 실패를 우선
@@ -473,6 +524,43 @@ class Quest3ActionProducer:
         if action_delta > 1e-6:
             self._changed_action_step_count += 1
         return action
+
+    def poll_button(
+        self,
+    ) -> OperatorButton | None:
+        '''Episode 밖에서 A/X 또는 B/Y button의 새 press를 반환하고 stale frame은 무시한다.'''
+        frame: QuestFrame = self._reader.read()
+        if self._clock() - frame.timestamp_s > self._max_frame_age_s:
+            return None
+        primary_pressed_now: bool
+        secondary_pressed_now: bool
+        primary_pressed_now, secondary_pressed_now = self._consume_button_presses(frame)
+        # 두 button이 같은 frame에서 눌리면 저장하지 않는 쪽을 우선
+        if secondary_pressed_now:
+            return OperatorButton.SECONDARY
+        if primary_pressed_now:
+            return OperatorButton.PRIMARY
+        return None
+
+    def publish_episode_status(
+        self,
+        status: EpisodeStatus,
+    ) -> None:
+        '''Episode 진행 상태를 relay를 거쳐 Quest 화면 상단 알림으로 전송한다.'''
+        last_state: EpisodeState | None = status.last_state
+        self._reader.send(
+            {
+                'type': 'episode_status',
+                'phase': status.phase.value,
+                'elapsed_s': status.elapsed_s,
+                'limit_s': status.limit_s,
+                'last_result': None if last_state is None else last_state.value,
+                'last_episode_saved': status.last_episode_saved,
+                'saved_episode_count': status.saved_episode_count,
+                'primary_button': self._button_labels[0],
+                'secondary_button': self._button_labels[1],
+            }
+        )
 
     def diagnostics(
         self,

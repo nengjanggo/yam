@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Protocol
 
 from ..types import RobotAction, RobotObservation
@@ -78,10 +79,25 @@ class YamABCRecorderAdapter:
         self,
         recorder: YamABCRecorder,
         step_encoder: StepEncoder,
+        episode_directory: Path,
+        complete_flag_name: str,
     ) -> None:
-        '''External recorder와 camera-aware step encoder를 저장한다.'''
+        '''External recorder, camera-aware step encoder와 task episode 폴더를 저장한다.'''
         self._recorder: YamABCRecorder = recorder
         self._step_encoder: StepEncoder = step_encoder
+        self._episode_directory: Path = episode_directory
+        self._complete_flag_name: str = complete_flag_name
+
+    def saved_episode_count(
+        self,
+    ) -> int:
+        '''현재 task 폴더에서 저장이 끝까지 완료된 episode 수를 반환한다.'''
+        if not self._episode_directory.is_dir():
+            return 0
+        return sum(
+            (episode_path / self._complete_flag_name).is_file()
+            for episode_path in self._episode_directory.iterdir()
+        )
 
     def start(
         self,

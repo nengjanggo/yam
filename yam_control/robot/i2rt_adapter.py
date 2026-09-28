@@ -180,16 +180,22 @@ class I2RTRobotBackend:
             initial_state: tuple[float, ...] = self.get_observation().state
             self._visualizer.connect(initial_state)
 
-    def get_observation(
+    def _measured_state(
         self,
-    ) -> RobotObservation:
-        '''I2RT observation을 shape `(S,)` state와 camera mapping으로 변환한다.'''
+    ) -> tuple[float, ...]:
+        '''Camera 없이 I2RT joint와 gripper 측정값만 shape `(S,)` state로 반환한다.'''
         robot: I2RTRobot = self._require_robot()
         raw_observation: Mapping[str, object] = robot.get_observations()
         arm: tuple[float, ...] = _to_float_tuple(raw_observation['joint_pos'])
         gripper: tuple[float, ...] = _to_float_tuple(raw_observation['gripper_pos'])
         # Shape `(6,)` arm과 shape `(1,)` gripper를 shape `(7,)` state로 결합
-        state: tuple[float, ...] = (*arm, *gripper)
+        return (*arm, *gripper)
+
+    def get_observation(
+        self,
+    ) -> RobotObservation:
+        '''I2RT observation을 shape `(S,)` state와 camera mapping으로 변환한다.'''
+        state: tuple[float, ...] = self._measured_state()
         images: Mapping[str, object] = {}
         if self._image_provider is not None:
             images = self._image_provider()
@@ -210,15 +216,15 @@ class I2RTRobotBackend:
         command: object = self._vector_converter(action.values)
         robot.command_joint_pos(command)
         if self._visualizer is not None:
-            state: tuple[float, ...] = self.get_observation().state
-            self._visualizer.sync(state)
+            self._visualizer.sync(self._measured_state())
 
     def move_to_pose(
         self,
         pose: tuple[float, ...],
     ) -> None:
         '''현재 state에서 지정한 shape `(S,)` pose까지 joint-space로 천천히 이동한다.'''
-        start: tuple[float, ...] = self.get_observation().state
+        # Camera가 끊겨도 robot 이동은 가능하도록 joint state만 읽음
+        start: tuple[float, ...] = self._measured_state()
         if len(start) != len(pose):
             raise ValueError('current state and target pose dimensions must match')
         step_count: int = max(1, round(self._move_duration_s * self._move_hz))
@@ -249,8 +255,8 @@ class I2RTRobotBackend:
         self,
     ) -> None:
         '''현재 measured state를 다시 command하여 robot pose를 유지한다.'''
-        observation: RobotObservation = self.get_observation()
-        self.execute(RobotAction(values=observation.state))
+        # Camera가 끊겨도 robot을 멈출 수 있도록 joint state만 읽음
+        self.execute(RobotAction(values=self._measured_state()))
 
     def close(
         self,

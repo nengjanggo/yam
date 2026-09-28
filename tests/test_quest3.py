@@ -5,7 +5,9 @@ from __future__ import annotations
 import unittest
 import json
 import ssl
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+
+from websockets.exceptions import ConnectionClosed
 
 from yam_control.teleop.quest3 import (
     Quest3ActionProducer,
@@ -14,7 +16,17 @@ from yam_control.teleop.quest3 import (
     parse_quest_frame_payload,
 )
 from yam_control.teleop.quest3_probe import _summarize_frames
-from yam_control.types import EpisodeOutcome, QuestFrame, QuestPose, RobotAction, RobotObservation
+from yam_control.types import (
+    EpisodeOutcome,
+    EpisodePhase,
+    EpisodeState,
+    EpisodeStatus,
+    OperatorButton,
+    QuestFrame,
+    QuestPose,
+    RobotAction,
+    RobotObservation,
+)
 
 
 class FakeQuestReader:
@@ -29,6 +41,7 @@ class FakeQuestReader:
         self._index: int = 0
         self.connected: bool = False
         self.read_count: int = 0
+        self.sent_messages: list[dict[str, object]] = []
 
     def connect(
         self,
@@ -55,6 +68,13 @@ class FakeQuestReader:
     ) -> dict[str, object]:
         '''Fake reader는 빈 수신 진단값을 반환한다.'''
         return {}
+
+    def send(
+        self,
+        message: Mapping[str, object],
+    ) -> None:
+        '''Relay로 보낸 message를 기록한다.'''
+        self.sent_messages.append(dict(message))
 
 
 class FakeRetargeter:
@@ -117,6 +137,18 @@ class FakeWebSocketConnection:
     ) -> None:
         '''Reader가 relay로 전송한 text message를 기록한다.'''
         self.sent_messages.append(message)
+
+
+class ClosedWebSocketConnection(FakeWebSocketConnection):
+    '''Send 시 relay 연결이 끊긴 WebSocket을 흉내 낸다.'''
+
+    def send(
+        self,
+        message: str,
+    ) -> None:
+        '''끊긴 connection 예외를 발생시킨다.'''
+        del message
+        raise ConnectionClosed(None, None)
 
 
 class FakeWebSocketConnector:
@@ -340,6 +372,91 @@ class Quest3ActionProducerTest(unittest.TestCase):
 
         self.assertEqual(outcomes, [None, None, None, EpisodeOutcome.SUCCESS])
 
+    def test_poll_button_reports_new_presses_between_episodes(
+        self,
+    ) -> None:
+        '''Episode 밖 button polling이 release 후 새 press만 한 번씩 반환하는지 검증한다.'''
+        frames: list[QuestFrame] = [
+            _button_frame(primary_pressed=True, secondary_pressed=False),
+            _button_frame(primary_pressed=False, secondary_pressed=False),
+            _button_frame(primary_pressed=True, secondary_pressed=False),
+            _button_frame(primary_pressed=True, secondary_pressed=False),
+            _button_frame(primary_pressed=False, secondary_pressed=True),
+        ]
+        producer: Quest3ActionProducer = Quest3ActionProducer(
+            reader=FakeQuestReader(frames=frames),
+            retargeter=FakeRetargeter(),
+            clock=_clock,
+        )
+
+        buttons: list[OperatorButton | None] = [producer.poll_button() for _ in frames]
+
+        self.assertEqual(
+            buttons,
+            [None, None, OperatorButton.PRIMARY, None, OperatorButton.SECONDARY],
+        )
+
+    def test_poll_button_ignores_stale_frame(
+        self,
+    ) -> None:
+        '''Stale frame의 button 입력은 episode 사이 입력으로도 인정하지 않는지 검증한다.'''
+        released: QuestFrame = _button_frame(primary_pressed=False, secondary_pressed=False)
+        pressed: QuestFrame = _button_frame(primary_pressed=True, secondary_pressed=False)
+        stale_pressed: QuestFrame = QuestFrame(
+            controller_pose=pressed.controller_pose,
+            hmd_pose=pressed.hmd_pose,
+            trigger=pressed.trigger,
+            clutch_pressed=pressed.clutch_pressed,
+            timestamp_s=0.0,
+            primary_button_pressed=True,
+        )
+        producer: Quest3ActionProducer = Quest3ActionProducer(
+            reader=FakeQuestReader(frames=[released, stale_pressed]),
+            retargeter=FakeRetargeter(),
+            clock=_clock,
+        )
+
+        self.assertIsNone(producer.poll_button())
+        self.assertIsNone(producer.poll_button())
+
+    def test_publish_episode_status_sends_result_and_button_labels(
+        self,
+    ) -> None:
+        '''Episode 결과, 저장 수와 왼손 controller button 이름을 relay message로 보내는지 검증한다.'''
+        reader: FakeQuestReader = FakeQuestReader(frames=[])
+        producer: Quest3ActionProducer = Quest3ActionProducer(
+            reader=reader,
+            retargeter=FakeRetargeter(),
+            clock=_clock,
+            controller_hand='left',
+        )
+
+        producer.publish_episode_status(
+            EpisodeStatus(
+                phase=EpisodePhase.WAITING_PREPARE,
+                last_state=EpisodeState.SUCCEEDED,
+                last_episode_saved=True,
+                saved_episode_count=3,
+            )
+        )
+
+        self.assertEqual(
+            reader.sent_messages,
+            [
+                {
+                    'type': 'episode_status',
+                    'phase': 'waiting_prepare',
+                    'elapsed_s': None,
+                    'limit_s': None,
+                    'last_result': 'succeeded',
+                    'last_episode_saved': True,
+                    'saved_episode_count': 3,
+                    'primary_button': 'X',
+                    'secondary_button': 'Y',
+                }
+            ],
+        )
+
     def test_stale_frame_button_is_ignored(
         self,
     ) -> None:
@@ -542,6 +659,23 @@ class Quest3ActionProducerTest(unittest.TestCase):
         reader.close()
 
         self.assertEqual(connection.sent_messages, [json.dumps(initial_message)])
+
+    def test_websocket_reader_send_ignores_closed_connection(
+        self,
+    ) -> None:
+        '''표시용 message 전송 중 relay 연결이 끊겨도 예외를 전파하지 않는지 검증한다.'''
+        connection: ClosedWebSocketConnection = ClosedWebSocketConnection(messages=[])
+        reader: WebSocketQuestFrameReader = WebSocketQuestFrameReader(
+            websocket_url='ws://127.0.0.1:8443/ws',
+            controller_hand='right',
+            connector=FakeWebSocketConnector(connection=connection),
+        )
+
+        reader.connect()
+        reader.send({'type': 'episode_status', 'phase': 'idle'})
+        reader.close()
+
+        self.assertTrue(connection.closed)
 
     def test_websocket_reader_skips_temporary_tracking_loss(
         self,
