@@ -9,6 +9,7 @@
 ```text
 yam/
 ├── yam.ipynb — configuration과 episode 실행 entry point
+├── finetune.ipynb — OpenPI fine-tuning command entry point
 ├── yam_control/
 │   ├── config.py — configuration type과 cross-field validation
 │   ├── types.py — observation, action과 episode data contract
@@ -54,6 +55,7 @@ RobotBackend ── RobotObservation ──► ActionProducer
 | `yam_control/data/` | [`YamABCRecorderAdapter`](../yam_control/data/recorder.py#L75)가 session recorder contract를 yam-abc episode format에 연결한다. |
 | `yam_control/policy/` | [`PiBackend`](../yam_control/policy/pi.py#L14)가 VLA loading boundary를, [`OpenLoopChunkExecutor`](../yam_control/policy/rtc.py#L9)가 chunk 실행 contract를 제공한다. |
 | `yam_control/safety/` | [`PassThroughSafetyGate`](../yam_control/safety/gates.py#L21)와 [`SweptPathSafetyGate`](../yam_control/safety/gates.py#L41)가 action 승인 정책을 제공한다. |
+| `third_party/yam-abc-reproduce/third_party/policy/openpi/` | [`pi05_yam_dit_lora`](../third_party/yam-abc-reproduce/third_party/policy/openpi/src/openpi/training/config.py#L811)가 single-arm LeRobot data transform, `pi05_base` BF16 JAX device restore와 action expert LoRA trainable parameter/rank/alpha/rsLoRA contract를 조합한다. [`Pi0.compute_loss()`](../third_party/yam-abc-reproduce/third_party/policy/openpi/src/openpi/models/pi0.py#L188)는 opt-in VLM prefix gradient boundary를 제공한다. |
 
 ## Input/output contract
 
@@ -61,6 +63,8 @@ RobotBackend ── RobotObservation ──► ActionProducer
 - `RobotObservation.images[role]`: shape `(I_h, I_w, 3)` RGB image; `I_h`와 `I_w`는 image height와 width다.
 - `RobotAction.values`: shape `(S,)` target state다.
 - `ActionChunk.values`: shape `(H, S)`; `H`는 action prediction horizon이다.
+- Fine-tuning dataset의 `observation.state`와 `action`: shape `(7,)`; 단일 YAM의 joint 6개와 normalized gripper 1개다.
+- Fine-tuning dataset의 `observation.images.top_rgb`와 `observation.images.wrist_rgb`: shape `(224, 224, 3)` RGB image다.
 - `QuestPose.position`: shape `(3,)` position vector다.
 - `QuestPose.orientation_xyzw`: shape `(4,)` quaternion이다.
 - Raw EE pose: shape `(N, 7)`; `N`은 episode frame 수이며 각 row는 position `(x, y, z)`와 quaternion `(qx, qy, qz, qw)`다.

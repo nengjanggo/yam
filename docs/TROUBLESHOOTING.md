@@ -42,6 +42,13 @@
 - 확인 방법: `ip -details link show can0`에서 `UP`과 `bitrate 1000000`을 확인한다.
 - 해결 방법: [README의 CAN 설정](../README.md#실제-yam과-camera-설정)을 다시 적용한다. Motor error 이후에는 Session 종료 cell을 실행한 뒤 hardware 상태를 확인하고 새 session으로 다시 연결한다.
 
+## π0.5 checkpoint 복원 중 `exit status 137`
+
+- 증상: `Restoring checkpoint` 직후 notebook에 `CalledProcessError`와 `exit status 137`이 표시된다.
+- 가능한 원인: Linux OOM killer가 host RAM에서 FP32 checkpoint와 변환본을 동시에 보유한 training process를 종료했다.
+- 확인 방법: `journalctl -k`에서 `Out of memory: Killed process ... python3`를 확인한다. GPU OOM이면 이 항목에 해당하지 않는다.
+- 해결 방법: 최신 `pi05_yam_dit_lora` config의 BF16 JAX device restore를 사용하도록 notebook kernel을 restart한 뒤 다시 실행한다. 그래도 발생하면 memory 사용 중인 application을 종료하거나 swap을 추가한다. Restore 단계의 OOM은 `BATCH_SIZE`만 줄여서는 해결되지 않는다.
+
 ## Module import 오류 또는 vendored package 누락
 
 - 증상: `yam_abc_reproduce`, `i2rt` 또는 관련 module을 찾지 못한다.

@@ -9,6 +9,14 @@
 node tests/quest_input_self_check.cjs
 node tests/quest_client_self_check.cjs
 jq empty yam.ipynb
+jq empty finetune.ipynb
+
+cd third_party/yam-abc-reproduce/third_party/policy/openpi
+uv run pytest -q \
+  src/openpi/policies/yam_policy_test.py \
+  src/openpi/training/yam_config_test.py \
+  src/openpi/models/model_test.py::test_pi05_stop_gradient_vlm_prefix_preserves_loss_and_action_expert_gradients
+  src/openpi/training/weight_loaders_test.py \
 ```
 
 실제 robot command가 발생하는 test는 작성하거나 자동 실행하지 않는다.
@@ -21,6 +29,7 @@ jq empty yam.ipynb
 - Quest frame parsing, stale-frame safety와 episode button: [`test_quest3.py`](../tests/test_quest3.py#L1)
 - YAM FK/IK와 gripper mapping: [`test_yam_retargeter.py`](../tests/test_yam_retargeter.py#L1)
 - Recorder schema, EE pose와 encoder 선택: [`test_yam_abc_recorder.py`](../tests/test_yam_abc_recorder.py#L1)
+- Single-arm YAM image mask, DiT LoRA parameter filter, LoRA rank/alpha/rsLoRA override·validation, `pi05_base` BF16 direct restore equivalence와 VLM prefix stop-gradient 전후 loss/action expert gradient equivalence: [`yam_policy_test.py`](../third_party/yam-abc-reproduce/third_party/policy/openpi/src/openpi/policies/yam_policy_test.py#L1), [`yam_config_test.py`](../third_party/yam-abc-reproduce/third_party/policy/openpi/src/openpi/training/yam_config_test.py#L1), [`weight_loaders_test.py`](../third_party/yam-abc-reproduce/third_party/policy/openpi/src/openpi/training/weight_loaders_test.py#L1), [`model_test.py`](../third_party/yam-abc-reproduce/third_party/policy/openpi/src/openpi/models/model_test.py#L44)
 
 ## Integration 및 simulation test
 
@@ -43,4 +52,5 @@ jq empty yam.ipynb
 - Top/wrist camera 동시 장시간 recording과 LeRobot v3 multi-episode round trip
 - Table geometry를 포함한 실제 `ConfigurationValidator`와 SafetyGate
 - π0, π0.5 checkpoint inference와 YAM-compatible RTC
+- `pi05_base` checkpoint를 사용한 one-step smoke training과 full fine-tuning
 - Leader Arm, GR00T와 Isaac Sim은 미구현 상태이므로 검증하지 않았다.
