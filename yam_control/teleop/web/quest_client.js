@@ -252,13 +252,14 @@
     if (cameraLayout === 'mujoco' && !videoAnchor) {
       videoAnchor = anchorFromViewer(viewerPose);
     }
+    // Wrist panel은 고개를 숙여도 보이도록 yaw뿐 아니라 pitch까지 머리 방향을 그대로 따라감
     const panelAnchor = cameraLayout === 'wrist'
-      ? anchorFromViewer(viewerPose)
+      ? viewerPose.transform.matrix
       : videoAnchor;
     if (!panelAnchor) {
       return;
     }
-    // MuJoCo는 큰 world-locked panel, wrist camera는 작은 head-locked 왼쪽 아래 panel을 사용
+    // MuJoCo는 큰 world-locked panel, wrist camera는 작은 head-locked 시야 왼쪽 아래 panel을 사용
     const panelTransform = cameraLayout === 'wrist'
       ? new Float32Array([
         0.42, 0, 0, 0,

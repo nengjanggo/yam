@@ -133,6 +133,28 @@ async function main() {
   assert.equal(lastChromaKey, 0);
   assert.equal(drawnMvps.length, 1);
 
+  // 고개를 60도 숙이면 wrist panel도 시선을 따라 아래로 이동한다.
+  const pitch = -Math.PI / 3;
+  const lookingDown = {
+    ...pose,
+    transform: {
+      ...pose.transform,
+      orientation: { x: Math.sin(pitch / 2), y: 0, z: 0, w: Math.cos(pitch / 2) },
+      matrix: new Float32Array([
+        1, 0, 0, 0,
+        0, Math.cos(pitch), Math.sin(pitch), 0,
+        0, -Math.sin(pitch), Math.cos(pitch), 0,
+        0, 1, 0, 1,
+      ]),
+    },
+  };
+  drawnMvps.length = 0;
+  xrSession.onFrame(150, { getViewerPose: () => lookingDown, getPose: () => lookingDown });
+  const wristCenterY = drawnMvps[0][13];
+  // 0.7 m 앞 panel이 60도 숙인 시선 방향이면 head 높이보다 약 0.6 m 아래에 있어야 함
+  assert.ok(wristCenterY < 0.5);
+  drawnMvps.length = 0;
+
   // Episode 결과와 다음 단계 안내를 시야 중앙 상단 알림으로 그린다.
   websocket.emit('message', {
     type: 'episode_status',
