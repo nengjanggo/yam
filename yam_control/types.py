@@ -95,6 +95,18 @@ class ActionChunk:
 
 
 @dataclass(frozen=True)
+class RtcGuidance:
+    '''RTC soft masking guidance에 사용할 이전 chunk와 weight 구간을 보관한다.'''
+
+    # 요청 시점 observation에 정렬된 이전 chunk의 남은 action, shape `(N, S)`
+    prev_action_chunk: ActionChunk
+    # 추론 동안 이전 chunk에서 실행될 step 수, weight 1 구간
+    inference_delay: int
+    # 이 index부터 이전 chunk를 무시하는 weight 0 구간 시작
+    prefix_attention_horizon: int
+
+
+@dataclass(frozen=True)
 class QuestPose:
     '''Shape `(3,)` position과 shape `(4,)` quaternion을 보관한다.'''
 
