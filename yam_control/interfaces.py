@@ -123,8 +123,9 @@ class VLABackend(Protocol):
     def predict_chunk(
         self,
         observation: RobotObservation,
+        action_prefix: ActionChunk | None = None,
     ) -> ActionChunk:
-        '''현재 observation으로 action chunk를 예측한다.'''
+        '''현재 observation과 optional RTC prefix로 action chunk를 예측한다.'''
         ...
 
     def close(

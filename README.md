@@ -23,27 +23,20 @@ uv sync --locked --all-groups
 .venv/bin/python --version
 ```
 
-## π0.5 fine-tuning
+## π0.5 fine-tuning, inference
 
 OpenPI dependency는 vendored OpenPI directory에서 별도로 설치한다.
 
 ```bash
 cd third_party/yam-abc-reproduce/third_party/policy/openpi
 uv sync --locked --group dev
-cd ../../../../..
 ```
 
-[`finetune.ipynb`](./finetune.ipynb)을 repository root에서 열고 다음 순서로 해당 flag 하나만 `True`로 설정해 실행한다.
+## YAM teleoperation
 
-1. `RUN_TESTS`
-2. `RUN_NORM_STATS`
-3. `RUN_SMOKE_TRAINING`
-4. `RUN_FULL_TRAINING`
-
-dataset은 `lerobot-v3/nengjanggo/yam_pick_up_the_white_ethernet_cable_and_plug_it_into_the_black_ethernet_port`에 있어야 한다. 첫 실행에서는 `pi05_base` checkpoint가 내려받아질 수 있다. model/data contract는 [Blueprint](./docs/BLUEPRINT.md)를 참조한다.
+Repository root에서 `yam-control` kernel로 [`teleop.ipynb`](./teleop.ipynb)을 열어 teleoperation을 실행한다.
 
 ## Quest 3 network 설정
-
 
 ```bash
 ip -br address # PC LAN IP 확인

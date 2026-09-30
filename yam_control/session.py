@@ -67,6 +67,14 @@ class RunSession:
         self._action_producer.connect()
         self._connected = True
 
+    def get_observation(
+        self,
+    ) -> RobotObservation:
+        '''연결된 RobotBackend의 최신 measured state와 camera frame을 반환한다.'''
+        if not self._connected:
+            raise RuntimeError('connect must run before get_observation')
+        return self._robot.get_observation()
+
     def prepare_episode(
         self,
     ) -> None:

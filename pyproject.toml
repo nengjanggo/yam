@@ -13,6 +13,7 @@ dependencies = [
     'fastapi>=0.115',
     'i2rt',
     'opencv-python-headless>=4.8,<5',
+    'openpi-client',
     'pillow>=12,<13',
     'uvicorn[standard]>=0.30',
 ]
@@ -29,6 +30,12 @@ build-constraint-dependencies = ['scikit-build-core<0.10']
 
 [tool.uv.sources]
 i2rt = { path = 'third_party/yam-abc-reproduce/third_party/i2rt', editable = true }
+openpi-client = { workspace = true, editable = true }
+
+[tool.uv.workspace]
+members = [
+    'third_party/yam-abc-reproduce/third_party/policy/openpi/packages/openpi-client',
+]
 
 [tool.setuptools.packages.find]
 include = ['yam_control*']

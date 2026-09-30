@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Protocol
 
 from ..types import RobotAction, RobotObservation, SafetyDecision
@@ -36,6 +37,42 @@ class PassThroughSafetyGate:
             accepted=True,
             action=action,
         )
+
+
+class JointStepSafetyGate:
+    '''Policy action의 유한성, gripper 범위와 joint step 크기를 검사한다.'''
+
+    def __init__(
+        self,
+        max_joint_step_rad: float,
+    ) -> None:
+        '''허용할 한 control step의 최대 joint 변화량을 저장한다.'''
+        if not math.isfinite(max_joint_step_rad) or max_joint_step_rad <= 0.0:
+            raise ValueError('max_joint_step_rad must be finite and positive')
+        self._max_joint_step_rad: float = max_joint_step_rad
+
+    def reset(
+        self,
+    ) -> None:
+        '''Episode별 내부 상태가 없으므로 초기화하지 않는다.'''
+
+    def evaluate(
+        self,
+        observation: RobotObservation,
+        action: RobotAction,
+    ) -> SafetyDecision:
+        '''Shape `(7,)` measured state와 action을 검사해 안전한 action만 승인한다.'''
+        if len(observation.state) != 7 or len(action.values) != 7:
+            raise ValueError('policy state and action must have shape (7,)')
+        valid_values: bool = all(math.isfinite(value) for value in (*observation.state, *action.values))
+        valid_gripper: bool = 0.0 <= action.values[6] <= 1.0
+        valid_joint_step: bool = all(
+            abs(target - current) <= self._max_joint_step_rad
+            for current, target in zip(observation.state[:6], action.values[:6], strict=True)
+        )
+        if not (valid_values and valid_gripper and valid_joint_step):
+            return SafetyDecision(accepted=False, action=RobotAction(values=observation.state), reason='unsafe policy action')
+        return SafetyDecision(accepted=True, action=action)
 
 
 class SweptPathSafetyGate:

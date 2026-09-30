@@ -2,13 +2,14 @@
 
 ## 범위
 
-이 repository는 Meta Quest 3 teleoperation과 VLA inference를 동일한 runtime contract로 실행하며 `execution_target`으로 실제 YAM과 MuJoCo YAM을 전환한다. 실행 entry point는 [`yam.ipynb`](../yam.ipynb#L1), component 조합 entry point는 [`create_session()`](../yam_control/factory.py#L353)이다.
+이 repository는 Meta Quest 3 teleoperation과 VLA inference를 동일한 runtime contract로 실행하며 `execution_target`으로 실제 YAM과 MuJoCo YAM을 전환한다. 실행 entry point는 [`teleop.ipynb`](../teleop.ipynb#L1)과 [`inference.ipynb`](../inference.ipynb#L1), component 조합 entry point는 [`create_session()`](../yam_control/factory.py#L358)이다.
 
 ## Repository 구조
 
 ```text
 yam/
-├── yam.ipynb — configuration과 episode 실행 entry point
+├── teleop.ipynb — Quest teleoperation entry point
+├── inference.ipynb — OpenPI server와 YAM inference entry point
 ├── finetune.ipynb — OpenPI fine-tuning command entry point
 ├── yam_control/
 │   ├── config.py — configuration type과 cross-field validation
@@ -49,20 +50,21 @@ RobotBackend ── RobotObservation ──► ActionProducer
 | `yam_control/config.py` | [`RunConfig`](../yam_control/config.py#L253), [`build_run_config()`](../yam_control/config.py#L278), [`with_camera_config()`](../yam_control/config.py#L328)가 실행 configuration을 정의한다. |
 | `yam_control/types.py` | [`RobotObservation`](../yam_control/types.py#L62), [`RobotAction`](../yam_control/types.py#L71), [`ActionChunk`](../yam_control/types.py#L78)가 component 간 data contract다. |
 | `yam_control/interfaces.py` | [`RobotBackend`](../yam_control/interfaces.py#L10), [`ActionProducer`](../yam_control/interfaces.py#L59), [`SafetyGate`](../yam_control/interfaces.py#L137), [`EpisodeRecorder`](../yam_control/interfaces.py#L155)를 정의한다. |
-| `yam_control/robot/` | [`I2RTRobotBackend`](../yam_control/robot/i2rt_adapter.py#L103)가 실제 YAM과 MuJoCo YAM을 같은 interface로 감싼다. [`YamEndEffectorKinematics`](../yam_control/robot/kinematics.py#L17)는 recorder와 teleoperation이 공유하는 FK를 제공한다. |
+| `yam_control/robot/` | [`I2RTRobotBackend`](../yam_control/robot/i2rt_adapter.py#L103)가 실제 YAM과 MuJoCo YAM을 같은 interface로 감싼다. [`create_default_robot()`](../yam_control/factory.py#L54)는 MuJoCo dataset image provider 또는 실제 CameraRig를 결합한다. [`YamEndEffectorKinematics`](../yam_control/robot/kinematics.py#L17)는 recorder와 teleoperation이 공유하는 FK를 제공한다. |
 | `yam_control/teleop/` | [`Quest3ActionProducer`](../yam_control/teleop/quest3.py#L399)가 Quest frame lifecycle을 관리하고 [`YamQuestRetargeter`](../yam_control/teleop/yam_retargeter.py#L100)가 controller target을 joint action으로 변환한다. |
 | `yam_control/camera/` | [`V4L2RGBCamera`](../yam_control/camera/v4l2.py#L20)가 한 device를 읽고 [`CameraRig`](../yam_control/camera/rig.py#L24)가 role별 worker lifecycle을 관리한다. |
 | `yam_control/data/` | [`YamABCRecorderAdapter`](../yam_control/data/recorder.py#L75)가 session recorder contract를 yam-abc episode format에 연결한다. |
-| `yam_control/policy/` | [`PiBackend`](../yam_control/policy/pi.py#L14)가 VLA loading boundary를, [`OpenLoopChunkExecutor`](../yam_control/policy/rtc.py#L9)가 chunk 실행 contract를 제공한다. |
-| `yam_control/safety/` | [`PassThroughSafetyGate`](../yam_control/safety/gates.py#L21)와 [`SweptPathSafetyGate`](../yam_control/safety/gates.py#L41)가 action 승인 정책을 제공한다. |
+| `yam_control/policy/` | [`WebsocketPiBackend`](../yam_control/policy/pi.py#L85)가 YAM observation과 optional RTC prefix를 OpenPI WebSocket 입력으로 변환한다. [`OpenLoopChunkExecutor`](../yam_control/policy/rtc.py#L11)는 chunk를 순서대로 실행하고, [`RealTimeChunkExecutor`](../yam_control/policy/rtc.py#L61)는 prefix-conditioned 다음 chunk를 비동기 요청한다. |
+| `yam_control/safety/` | [`JointStepSafetyGate`](../yam_control/safety/gates.py#L42)가 real inference action의 유한성·gripper 범위·joint step을 검사한다. [`SweptPathSafetyGate`](../yam_control/safety/gates.py#L78)는 별도 configuration validator 경계다. |
 | `third_party/yam-abc-reproduce/third_party/policy/openpi/` | [`pi05_yam_dit_lora`](../third_party/yam-abc-reproduce/third_party/policy/openpi/src/openpi/training/config.py#L811)가 single-arm LeRobot data transform, `pi05_base` BF16 JAX device restore와 action expert LoRA trainable parameter/rank/alpha/rsLoRA contract를 조합한다. [`Pi0.compute_loss()`](../third_party/yam-abc-reproduce/third_party/policy/openpi/src/openpi/models/pi0.py#L188)는 opt-in VLM prefix gradient boundary를 제공한다. |
 
 ## Input/output contract
 
 - `RobotObservation.state`: shape `(S,)`; `S`는 robot state dimension이며 단일 YAM에서 arm joint 6개와 normalized gripper 1개다.
-- `RobotObservation.images[role]`: shape `(I_h, I_w, 3)` RGB image; `I_h`와 `I_w`는 image height와 width다.
+- `RobotObservation.images[role]`: 실제 camera에서는 RGB image를 담은 `CameraFrame`, MuJoCo 검증에서는 shape `(I_h, I_w, 3)` RGB array다. `I_h`와 `I_w`는 image height와 width다.
+- OpenPI WebSocket 입력은 `observation/state` shape `(7,)`, `observation/image`와 `observation/left_wrist` shape `(224, 224, 3)`, `prompt`다.
 - `RobotAction.values`: shape `(S,)` target state다.
-- `ActionChunk.values`: shape `(H, S)`; `H`는 action prediction horizon이다.
+- `ActionChunk.values`: shape `(H, S)`; `H`는 action prediction horizon이다. RTC `action_prefix`는 shape `(P, S)`이고 `0 < P < H`를 유지한다.
 - Fine-tuning dataset의 `observation.state`와 `action`: shape `(7,)`; 단일 YAM의 joint 6개와 normalized gripper 1개다.
 - Fine-tuning dataset의 `observation.images.top_rgb`와 `observation.images.wrist_rgb`: shape `(224, 224, 3)` RGB image다.
 - `QuestPose.position`: shape `(3,)` position vector다.
@@ -77,5 +79,6 @@ RobotBackend ── RobotObservation ──► ActionProducer
 - Recorder는 SafetyGate를 통과해 backend에 전달된 action만 저장한다.
 - Hold step, initial pose 이동과 environment reset 구간은 episode sample에 포함하지 않는다.
 - Camera role은 episode 전체에서 고정되고 stale frame은 재사용하지 않는다.
+- OpenPI server는 checkpoint step directory의 `params`와 `assets/yam/norm_stats.json`을 로드하며, episode가 끝나도 유지된다. MuJoCo는 dataset image provider, 실제 YAM은 CameraRig와 실제 measured state를 사용한다.
 - 실제 YAM과 MuJoCo YAM 전환은 `execution_target` 변경만으로 수행하며 downstream component contract는 유지한다.
 - Leader Arm과 GR00T는 public configuration에 남아 있지만 실행 시 명시적으로 `NotImplementedError`를 발생시킨다.

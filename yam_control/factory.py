@@ -12,7 +12,7 @@ from typing import cast
 from .config import ExecutionTarget, InferenceRunConfig, QuestConfig, RobotConfig, RunConfig, TeleopRunConfig
 from .data import NullRecorder
 from .interfaces import ActionProducer, EpisodeRecorder, RobotBackend, SafetyGate
-from .robot.i2rt_adapter import CameraSource, I2RTRobot, I2RTRobotBackend, RobotVisualizer
+from .robot.i2rt_adapter import CameraSource, I2RTRobot, I2RTRobotBackend, ImageProvider, RobotVisualizer
 from .safety import PassThroughSafetyGate
 from .session import RunSession
 from .types import RobotAction, RobotObservation, SafetyDecision
@@ -51,10 +51,14 @@ def _load_i2rt_robot(
     return cast(I2RTRobot, robot)
 
 
-def _create_default_robot(
+def create_default_robot(
     config: RunConfig,
+    *,
+    image_provider: ImageProvider | None = None,
 ) -> RobotBackend:
-    '''RunConfig의 execution target에 맞는 I2RTRobotBackend를 생성한다.'''
+    '''RunConfig와 optional MuJoCo image provider로 I2RTRobotBackend를 생성한다.'''
+    if config.common.execution_target == 'real' and image_provider is not None:
+        raise ValueError('real robot must use camera frames instead of a dataset image provider')
     visualizer_factory: Callable[[I2RTRobot], RobotVisualizer] | None = None
     if config.common.execution_target == 'mujoco':
         visualizer_factory = partial(
@@ -94,6 +98,7 @@ def _create_default_robot(
         loader=_load_i2rt_robot,
         vector_converter=_numpy_vector,
         visualizer_factory=visualizer_factory,
+        image_provider=image_provider,
         camera=camera,
     )
 
@@ -277,7 +282,7 @@ class _UnavailableRecorder:
 class RuntimeDependencies:
     '''각 configuration 축의 구현체를 독립적으로 교체하는 factory 집합이다.'''
 
-    robot_factory: RobotFactory = _create_default_robot
+    robot_factory: RobotFactory = create_default_robot
     quest3_factory: ActionProducerFactory | None = _create_default_quest3_action_producer
     pi_factory: ActionProducerFactory | None = None
     rtc_factory: ActionProducerFactory | None = None

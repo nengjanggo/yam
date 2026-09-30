@@ -2,7 +2,7 @@
 
 ## Configuration 축과 component 조합
 
-Run mode, action source, execution target, SafetyGate, recording과 RTC는 독립된 configuration 축으로 유지한다. [`create_session()`](../yam_control/factory.py#L353)이 이 축을 concrete component로 한 번만 변환하므로 runtime component는 다른 축의 조건문을 반복하지 않는다.
+Run mode, action source, execution target, SafetyGate, recording과 RTC는 독립된 configuration 축으로 유지한다. [`create_session()`](../yam_control/factory.py#L358)이 이 축을 concrete component로 한 번만 변환하므로 runtime component는 다른 축의 조건문을 반복하지 않는다.
 
 Teleoperation에서는 RTC가 의미 없으므로 `use_rtc`를 무시한다. 이 normalization은 [`build_run_config()`](../yam_control/config.py#L278)에서 수행한다. Recording은 별도 flag 없이 실제 robot teleoperation에서만 켜고, MuJoCo에서는 실제 camera image와 simulation state가 섞인 dataset을 만들지 않도록 끈다. 이 선택은 [`_select_recorder()`](../yam_control/factory.py#L333)가 담당한다.
 
@@ -24,7 +24,7 @@ Tick당 joint delta와 controller reach limit은 물리 hardware 차이를 조�
 
 ## Safety 전략
 
-SafetyGate는 action producer와 backend 사이에 단일 승인 지점으로 둔다. [`SweptPathSafetyGate`](../yam_control/safety/gates.py#L41)는 현재 configuration뿐 아니라 목표까지의 path를 검사하고, 위험을 감지하면 stop을 latch한다. Validator가 없을 때 안전하다고 추정하지 않고 실행을 차단한다.
+SafetyGate는 action producer와 backend 사이에 단일 승인 지점으로 둔다. [`SweptPathSafetyGate`](../yam_control/safety/gates.py#L78)는 현재 configuration뿐 아니라 목표까지의 path를 검사하고, 위험을 감지하면 stop을 latch한다. Validator가 없을 때 안전하다고 추정하지 않고 실행을 차단한다.
 
 `use_safety_gate=False`는 초기 bring-up을 위해 허용하지만 software safety를 대체하지 않는다. 실제 robot에서는 hardware emergency stop과 작업자 workspace 절차가 필수다.
 
@@ -52,4 +52,6 @@ Video encoder는 hardware encoder보다 `libx264`를 사용한다. Hardware enco
 
 ## VLA와 RTC boundary
 
-π0와 π0.5 loading은 [`PiBackend`](../yam_control/policy/pi.py#L14)의 injection boundary로 남겨 runtime import와 checkpoint dependency를 지연한다. RTC는 YAM-compatible upstream producer가 확정될 때 [`RTCActionProducerAdapter`](../yam_control/policy/rtc.py#L59)에 주입한다. 특정 simulation reference implementation을 YAM runtime으로 재작성하지 않는다.
+π0와 π0.5 checkpoint는 기존 OpenPI server가 별도 process에서 로드하고 YAM은 [`WebsocketPiBackend`](../yam_control/policy/pi.py#L85)로 가볍게 연결한다. OpenPI의 normalization과 action 복원을 그대로 사용하고 notebook kernel에 대형 model dependency를 로드하지 않기 위한 선택이다. [`OpenLoopChunkExecutor`](../yam_control/policy/rtc.py#L11)는 한 번 받은 chunk를 순서대로 실행한다. `USE_RTC=True`에서는 [`RealTimeChunkExecutor`](../yam_control/policy/rtc.py#L61)가 현재 chunk의 마지막 `P`개 action을 OpenPI에 보내고, OpenPI는 기존 delta/normalization transform 후 JAX flow sampling의 prefix를 고정한다. 다음 chunk는 worker에서 미리 요청하고 prefix `P`개를 건너뛴 continuation을 실행한다. 응답 지연으로 chunk가 소진되면 마지막 target을 유지한다. 이는 hard-prefix RTC 방식이며 gradient-guidance RTC와는 다른 선택이다.
+
+MuJoCo smoke 검증에서는 dataset top/wrist image와 MuJoCo measured state를 조합한다. 이는 camera→server→action→robot 연결을 확인하기 위한 입력이며 실제 작업 장면의 재현이나 policy 성능 평가는 아니다. 실제 YAM에서는 [`CameraRig`](../yam_control/camera/rig.py#L134)와 I2RT measured state를 사용하고 [`JointStepSafetyGate`](../yam_control/safety/gates.py#L42)로 비정상 action을 거부한다. 첫 JAX inference는 robot 연결 전에 dummy observation으로 warmup하고 action은 폐기한다. 이 gate는 collision validator를 대체하지 않으며 실제 robot motion과 control latency는 hardware에서 별도로 검증해야 한다.
